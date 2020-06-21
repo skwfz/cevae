@@ -4,6 +4,7 @@ import scipy.stats as stats
 import numpy as np
 import pandas as pd
 import collections
+import itertools
 
 import torch
 from torch.optim import Adam, SGD
@@ -127,7 +128,7 @@ class Decoder(nn.Module):
         hidden_dim, 
         num_hidden,#hidden layers for the y prediction and x prediction
         activation=nn.ELU(), 
-        z_dim=2, 
+        z_dim=1, 
         device='cpu',
         t_z_layers=0,
         z_mode='normal',
@@ -136,35 +137,24 @@ class Decoder(nn.Module):
     ):
         super().__init__()
         self.input_dim = input_dim
-        self.z_dim = z_dim
+        self.z_dim = 1
         self.x_mode = x_mode
         self.z_mode = z_mode
 
-        # p(x|z) <- REPLACE with diagnormalnet or bernoullinet or something depending on x
-        #Should we have a completely different NN for each X dimension?
+        # p(x|z) old, for the normal case
         self.hidden_x_nn = DiagNormalNet(
             [z_dim] + num_hidden*[hidden_dim] + [input_dim]
         )
-        #One NN to predict all probs. or a different NN for each prob? Also, I guess we could just use t_z_layers here
-        #(otherwise num_hidden)
-        #If z is binary, what sense does it sense to even have the neural network here?
-        self.hidden_x_nns_binary = nn.ModuleList([BernoulliNet([z_dim] + t_z_layers*[hidden_dim]) for i in range(input_dim)])
+        
+        #A linear regression for each x. Assumes that z_dim = 1
+        self.hidden_x_nns_binary = nn.ModuleList([nn.Linear(1,1) for i in range(input_dim)])
 
-        # p(t|z) <- #Just 1 layer? How was it in the paper?
-        self.treatment_logits_nn = BernoulliNet(
-            [z_dim] + t_z_layers * [hidden_dim]
-        )
+        # p(t|z)
+        self.treatment_logits_nn = nn.Linear(1,1)
 
-        # p(y|t,z) <- These seem OK
-        # TODO doesnt look like this is TARNet <- does it have to be?
-        self.y0_nn = BernoulliNet(
-            [z_dim] +
-            num_hidden * [hidden_dim],
-        )
-        self.y1_nn = BernoulliNet(
-            [z_dim] +
-            num_hidden * [hidden_dim]
-        )
+        # p(y|t,z)
+        self.y0_nn = nn.Linear(1,1)
+        self.y1_nn = nn.Linear(1,1)
 
     def forward(self, z, t):
         xloc = 0
@@ -175,12 +165,12 @@ class Decoder(nn.Module):
         elif self.x_mode == 'binary':
             x_logits = torch.zeros(z.shape[0], self.input_dim)
             for i in range(self.input_dim):
-                x_logits[:,i] = self.hidden_x_nns_binary[i](z)[0][:,0]
-        t_logits, = self.treatment_logits_nn(z) # <- OK
+                x_logits[:,i] = self.hidden_x_nns_binary[i](z)[:,0]
+        t_logits = self.treatment_logits_nn(z)
         #We need to have the observed t here because that ends up in the likelihood function of y through the p(y|x,t)
         #neural network. Note that the forward function is thus useful mostly in training (we have to choose t)
-        y_logits0 = self.y0_nn(z)[0]
-        y_logits1 = self.y1_nn(z)[0]
+        y_logits0 = self.y0_nn(z)
+        y_logits1 = self.y1_nn(z)
         y_logits = y_logits1*t + y_logits0*(1-t)#torch.where(t==1, y_logits1, y_logits0)
 
         return (#One should choose between (xloc,xscale) and x_logits appropriately when using
@@ -190,7 +180,7 @@ class Decoder(nn.Module):
     
     def sample(self,size):
         #Create a sample (z,x,t,y) according to the learned joint distribution
-        """TODO: Assumes normally distributed z and x for now"""
+        """TODO: probably doesn't work for this dummy model"""
         if self.z_mode == "normal":
             z_sample = torch.randn((size,self.z_dim))
         elif self.z_mode == "binary":
@@ -201,12 +191,12 @@ class Decoder(nn.Module):
         elif self.x_mode == "binary":
             x_logits = torch.zeros(size, self.input_dim)
             for i in range(self.input_dim):
-                x_logits[:,i] = self.hidden_x_nns_binary[i](z_sample)[0][:,0]
+                x_logits[:,i] = self.hidden_x_nns_binary[i](z_sample)[:,0]
             x_sample = dist.Bernoulli(torch.sigmoid(x_logits)).sample()
-        t_logits, = self.treatment_logits_nn(z_sample)
+        t_logits = self.treatment_logits_nn(z_sample)
         t_sample = dist.Bernoulli(torch.sigmoid(t_logits)).sample()
-        y_logits0 = self.y0_nn(z_sample)[0]
-        y_logits1 = self.y1_nn(z_sample)[0]
+        y_logits0 = self.y0_nn(z_sample)
+        y_logits1 = self.y1_nn(z_sample)
         y_logits = y_logits1*t_sample + y_logits0*(1-t_sample)
         y_sample = dist.Bernoulli(torch.sigmoid(y_logits)).sample()
         return z_sample, x_sample, t_sample, y_sample
@@ -215,18 +205,21 @@ class Encoder(nn.Module):
     def __init__(
         self, 
         input_dim, 
-        hidden_dim, 
-        num_hidden, 
-        activation=nn.ELU(), 
-        z_dim=2,
+        hidden_dim,
+        num_hidden,
+        activation=nn.ELU(),
+        z_dim=1,
         device='cpu',
-        z_mode = 'normal'
+        z_mode = 'binary'
     ):
         super().__init__()
         self.input_dim = input_dim
         self.z_dim = z_dim
         self.z_mode = z_mode
-
+        
+        self.dummycombinations = 2**(input_dim+1)
+        self.q_z_dummies = nn.ModuleList([nn.Linear(1,1) for i in range(self.dummycombinations)])
+        
         # q(z|x,t,y)
         self.q_z_nn = FullyConnected(#correspnds to g1 in the paper
             [input_dim + 1] +#Why + 1? <- because y is also a parameter
@@ -239,24 +232,28 @@ class Encoder(nn.Module):
         self.q_z1_nn = DiagNormalNet(
             [hidden_dim, z_dim]
         )
-        self.q_z0_nn_binary = BernoulliNet([hidden_dim])#The situation is a bit funny in the complete binary case, but I guess we can continue using the same architecture
-        self.q_z1_nn_binary = BernoulliNet([hidden_dim])
+        #self.q_z0_nn_binary = BernoulliNet([hidden_dim])#The situation is a bit funny in the complete binary case, but I guess we can continue using the same architecture
+        #self.q_z1_nn_binary = BernoulliNet([hidden_dim])
 
     def forward(self, x, t, y):#Should take as inputs the obs. t and y
         # q(z|x,t,y) <- here we should have obs. t and y, otherwise maybe ok
         hqz = self.q_z_nn.forward(torch.cat((x, y), 1))
         z_mu = 0
         z_var = 0
-        z_logits = 0
+        z_logits = torch.zeros((x.shape[0], 1))
         if self.z_mode == 'normal':
             loc0, scale0 = self.q_z0_nn(hqz)
             loc1, scale1 = self.q_z1_nn(hqz)
             z_mu = t*loc1 + (1-t)*loc0#torch.where(t == 1, loc1, loc0)
             z_var = t*scale1 + (1-t)*scale0#torch.where(t == 1, scale1, scale0)
         elif self.z_mode == 'binary':
-            z_logits0 = self.q_z0_nn_binary(hqz)[0]
-            z_logits1 = self.q_z1_nn_binary(hqz)[0]
-            z_logits = t*z_logits1 + (1-t)*z_logits0
+            combs = [[int(k) for k in seq] for seq in itertools.product("01", repeat=self.input_dim+1)]#All t, x combinations
+            for i in range(self.dummycombinations):
+                t_c = torch.Tensor(combs[i][0:1])
+                x_c = torch.Tensor(combs[i][1:])
+                #This should pick one from the loop and nothing else for each unit in the input sample
+                correct_network = (t_c==t).double() * (x==x_c).double().prod(1).unsqueeze(1)
+                z_logits = z_logits + self.q_z_dummies[i](y)*correct_network
 
         return z_mu, z_var, z_logits
 
@@ -265,7 +262,7 @@ class tInferNet(nn.Module):
         self, 
         input_dim, 
         #hidden_dim=2, 
-        #num_hidden=2, 
+        #num_hidden=2,
         activation=nn.ELU(),
         device='cpu'
     ):
@@ -311,22 +308,22 @@ class yInferNet(nn.Module):
         y_logits = params1*t + params0*(1-t)#torch.where(t == 1, params1, params0)#t should also be bs x 1?
         return y_logits
 
-class CEVAE(nn.Module):
+class dummyCEVAE(nn.Module):
     def __init__(
         self, 
         input_dim, 
-        encoder_hidden_dim=4, 
-        decoder_hidden_dim=4,
-        num_hidden=3,
-        activation=nn.ELU(), 
-        z_dim=2, 
+        encoder_hidden_dim=4,#The use of this is optional
+        decoder_hidden_dim=3,
+        num_hidden=3,#This too
+        activation=nn.ELU(),#probably don't need this either
         device='cpu',
-        t_z_layers = 0,
-        z_mode='normal',
-        x_mode='normal'
+        t_z_layers = 0, #this should also be unnecessary
+        z_mode='binary',
+        x_mode='binary'
     ):
         super().__init__()
-
+        
+        z_dim = 1#1D assumed to make this clear and easy
         self.input_dim = input_dim
         self.z_dim = z_dim
         self.z_mode = z_mode
@@ -350,20 +347,6 @@ class CEVAE(nn.Module):
             z_mode=z_mode,
             x_mode=x_mode
         )
-        #self.t_infer = tInferNet( <- These should just be trained separately somewhere
-        #    input_dim, 
-            #hidden_dim, 
-            #num_hidden,
-        #    activation,
-        #    z_dim
-        #)
-        #self.y_infer = yInferNet(
-        #    input_dim, 
-        #    hidden_dim, 
-        #    num_hidden,
-        #    activation,
-        #    z_dim
-        #)
 
         self.to(device)
         self.float()
@@ -389,17 +372,14 @@ class CEVAE(nn.Module):
         z_logits = 0
         
         z_mean, z_var, z_logits = self.encoder.forward(x, t, y)
-        if self.z_mode == 'normal':
-            z = self.reparameterize(z_mean, z_var)#Note just 1 sample
-        elif self.z_mode == 'binary':
-            z = self.reparameterize_bernoulli(z_logits)
-        (x_mean, x_var, x_logits, t_logits,
-            y_logits) = self.decoder(z,t)
-
-        #Auxiliary inference distributions used for out of sample prediction
-        #tinfer_logit = self.t_infer(x)[0]
-        #yinfer_logit = self.y_infer(x,t)
-
+        if self.z_mode == 'binary':
+            #We want the values decoder values for both z inputs
+            z0 = torch.zeros((x.shape[0], 1))
+            z1 = torch.ones((x.shape[0], 1))
+            (x_mean0, x_var0, x_logits0, t_logits0,
+                y_logits0) = self.decoder(z0,t)
+            (x_mean1, x_var1, x_logits1, t_logits1,
+                y_logits1) = self.decoder(z1,t)
         return (
-            z_mean, z_var, z_logits, x_mean, x_var, x_logits, t_logits, y_logits
+            z_logits, x_logits0, x_logits1, t_logits0, t_logits1, y_logits0, y_logits1
         )

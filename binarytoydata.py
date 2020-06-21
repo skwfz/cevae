@@ -26,7 +26,6 @@ def binary_data_df(num_samples,
     xs_0 = dist.Bernoulli(probs=x_expectations[:,0].T).sample((num_samples,))
     xs_1 = dist.Bernoulli(probs=x_expectations[:,1].T).sample((num_samples,))
     xs = torch.where(zs==1,xs_1,xs_0)
-    print(xs.size())
     
     #Column 0 corresponds to P(t=1|z=0) and column 1 to P(t=1|z=1)
     ts_0 = dist.Bernoulli(probs=t_expectations[:,0]).sample((num_samples,))
