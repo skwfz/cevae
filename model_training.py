@@ -40,7 +40,8 @@ def kld_loss(mu, var, kld_coef=1.):
 def kld_loss_bernoulli(logits):
     # Assumes that the prior p(z=1) = 0.5
     probs = torch.sigmoid(logits)
-    kld = -(torch.log(probs) + torch.log(1-probs) - 2*np.log(0.5)).sum()
+    #kld = -(torch.log(probs) + torch.log(1-probs) - 2*np.log(0.5)).sum()
+    kld = (probs*torch.log(2*probs) + (1-probs)*torch.log(2*(1-probs))).sum()
     return kld
 
 def x_reconc_loss(mean, var, x):
