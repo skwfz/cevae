@@ -1,0 +1,22 @@
+-obs t should be bs x 1
+-amount of layers in all networks?
+-parameters inputted to different networks: what is needed?
+-Make sure that all x, t, y and z are bs x dim everywhere
+-sum or mean in the losses? Should be consistent
+
+
+problems:
+-when reconstructing y, we should really use reconstructed t
+    -I think that this means that really we should do 4-way classification on (y,t) pairs? (not independent)
+-Using observed or inferred t, the two classification problems are separate in a hacky way
+    -Is the inferred t sampled or ML-estimated?
+
+-The github implementation does the evaluation in its own way completely:
+    -First infer y from the observed x and t, use the max likelihood estimate
+    -We get z_infer from those 3
+    -we then get y1 and y0 from p(y|z,t) -distribution means
+
+-numerical stability is an issue in the model.evaluate function
+
+
+-Seems like we need to make sure that model capacity is high enough -> hidden layer size 2 might not be enough
