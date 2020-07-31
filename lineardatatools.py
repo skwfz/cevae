@@ -122,7 +122,7 @@ def avg_causal_L1_dist(model, c_yt, c_yz, s_y, c_t, s_t, c_x, p_y_zt_nn, n=100, 
     avg_causal_dist = (causal_dist * pt_true).sum()*t_len
     return avg_causal_dist, py_dot_model, py_dot_true, y_range, t_range, pt_true
 
-def avg_causal_L1_dist_general(model, c_yt, c_yz, s_y, c_t, s_t, c_x, p_y_zt_nn, z_dim, n=100, lim=6, p_y_zt_std=False):
+def avg_causal_L1_dist_general(model, c_yt, c_yz, s_y, c_t, s_t, c_x, n=100, lim=6):
     """Calculates
     ∫|𝑃(𝑦|𝑑𝑜(𝑡),𝑃𝑡𝑟𝑢𝑒(𝑦|𝑑𝑜(𝑡))|𝐿1𝑃(𝑡)𝑑𝑡
     for the model with continuous t and y. Doesn't assume z_dim=1.
@@ -134,6 +134,7 @@ def avg_causal_L1_dist_general(model, c_yt, c_yz, s_y, c_t, s_t, c_x, p_y_zt_nn,
     z_len = 2*lim/n
     y_len = 2*lim/n
     t_len = 2*lim/n
+    z_dim = model.z_dim
     
     #P(t|z)
     pt_z_mean_true = c_t*z_range
@@ -178,7 +179,8 @@ def run_model_for_data_sets(datasizes, datasize_times, num_epochs,
                             binary_t_y, p_y_zt_nn, q_z_xty_nn,
                             generate_df, dataparameters, track_function, true_value,
                             device='cpu', p_x_z_nn=False, p_t_z_nn=False, p_y_zt_std=False, p_x_z_std=False,
-                            p_t_z_std=False):
+                            p_t_z_std=False, decoder_hidden_dim=3, decoder_num_hidden=3,
+                            encoder_hidden_dim=4, encoder_num_hidden=3,):
     """Runs the model for different sample sizes multiple times for each size. Saves the results in data/{folder}.
     Currently just empties everything in the folder, but we also have the parameter 'name' to save the results of 
     different experiments in the same folder, if we happen to need that. """
@@ -186,9 +188,17 @@ def run_model_for_data_sets(datasizes, datasize_times, num_epochs,
         os.mkdir("data/{}/".format(folder))
     except OSError:
         print("Creation of the directory data/{}/ failed. Trying to empty the same folder.".format(folder))
-        files = glob.glob('/data/{}/'.format(folder))
+        files = glob.glob('data/{}/*'.format(folder))
         for f in files:
             os.remove(f)
+    
+    if not isinstance(num_epochs, list):
+        num_epochs = datasize_times*[num_epochs]
+    if not isinstance(lr_start, list):
+        lr_start = datasize_times*[lr_start]
+    if not isinstance(lr_end, list):
+        lr_end = datasize_times*[lr_end]
+    
     i,j = 0,0
     dfs = {datasize: {} for datasize in datasizes}
     models = {datasize: {} for datasize in datasizes}
@@ -203,12 +213,14 @@ def run_model_for_data_sets(datasizes, datasize_times, num_epochs,
             #dummy test loader
             test_loader, _ = LinearDataLoader(LinearDataset(df[:1]), validation_split=0.0).get_loaders(batch_size=1)
             #Running the model
-            model = run_cevae(num_epochs=num_epochs, lr_start=lr_start, lr_end=lr_end,
+            model = run_cevae(num_epochs=num_epochs[i], lr_start=lr_start[i], lr_end=lr_end[i],
                 train_loader=train_loader, test_loader=test_loader, input_dim=input_dim, z_dim=z_dim,
                 plot_curves=False, print_logs=False, device=device,
                 binary_t_y=binary_t_y, p_y_zt_nn=p_y_zt_nn, q_z_xty_nn=q_z_xty_nn,
                 p_x_z_nn = p_x_z_nn, p_t_z_nn = p_t_z_nn, p_y_zt_std = p_y_zt_std,
-                p_x_z_std = p_x_z_std, p_t_z_std = p_t_z_std)
+                p_x_z_std = p_x_z_std, p_t_z_std = p_t_z_std, decoder_hidden_dim=decoder_hidden_dim, 
+                decoder_num_hidden=decoder_num_hidden, encoder_hidden_dim=encoder_hidden_dim, 
+                encoder_num_hidden=encoder_num_hidden)
 
             dfs[num_samples][j] = df
             models[num_samples][j] = model
@@ -221,11 +233,14 @@ def run_model_for_data_sets(datasizes, datasize_times, num_epochs,
         i += 1
     return dfs, models
 
-def load_dfs_models(folder, name, datasizes, datasize_times,
+def load_dfs_models(folder, name,
                    input_dim, z_dim, device, binary_t_y,
                   p_y_zt_nn, q_z_xty_nn, 
                   decoder_hidden_dim=3, decoder_num_hidden=3,
-                  encoder_hidden_dim=4, encoder_num_hidden=3):
+                  encoder_hidden_dim=4, encoder_num_hidden=3,
+                  p_x_z_nn=False, p_t_z_nn=False, p_y_zt_std=False, p_x_z_std=False,
+                  p_t_z_std=False
+                   ):
     """Loads dataframes and trained models from data/{folder}/ that match the experiment name"""
     dfs = {}
     models = {}
@@ -240,7 +255,8 @@ def load_dfs_models(folder, name, datasizes, datasize_times,
             elif match.group(1) == "model":
                 model = linearCEVAE(input_dim, z_dim, device=device, binary_t_y=binary_t_y, 
                   p_y_zt_nn=p_y_zt_nn, decoder_hidden_dim=decoder_hidden_dim, decoder_num_hidden=decoder_num_hidden, 
-                  q_z_xty_nn=q_z_xty_nn, encoder_hidden_dim=encoder_hidden_dim, encoder_num_hidden=encoder_num_hidden)
+                  q_z_xty_nn=q_z_xty_nn, encoder_hidden_dim=encoder_hidden_dim, encoder_num_hidden=encoder_num_hidden,
+                  p_x_z_nn=p_x_z_nn, p_t_z_nn=p_t_z_nn, p_y_zt_std=p_y_zt_std, p_x_z_std=p_x_z_std,p_t_z_std=p_t_z_std)
                 model.load_state_dict(torch.load("data/{}/{}".format(folder,file)))
                 model.eval()
                 if not int(match.group(3)) in models:
