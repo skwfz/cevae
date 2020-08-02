@@ -86,6 +86,8 @@ class Decoder(nn.Module):
     def forward(self, z, t):
         bs = z.shape[0]
         
+        t_std,y_std=None,None#In case these are not estimated at all
+        
         if self.p_x_z_nn:
             if self.p_x_z_std:
                 x_res = self.x_nns_real(z)
@@ -103,7 +105,10 @@ class Decoder(nn.Module):
         #We need to have the observed t here because that ends up in the likelihood function of y through the p(y|z,t)
         #neural network.
         if self.binary_t_y:
-            t_pred = self.treatment_pred(z)
+            if self.p_t_z_nn:
+                t_pred = self.t_nn_real(z)
+            else:
+                t_pred = self.t_nn(z)
             if self.p_y_zt_nn:
                 y_logits0 = self.y0_nn_real(z)
                 y_logits1 = self.y1_nn_real(z)

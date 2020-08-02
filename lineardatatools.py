@@ -75,6 +75,22 @@ def linear_binary_ty_ate_2(p_y_zt1_func, p_y_zt0_func):
                  + p_y_zt0_func(full_range[1:])*scipy.stats.norm.pdf(full_range[1:]))*box_width/2).sum()
     return p_y_dot1 - p_y_dot0
 
+def linear_binary_ty_ate_3(model, z_dim):
+    """Handles also higher z dimensions. Uses the basic integration rule"""
+    n = 1000
+    box_width = 12/n
+    z_range = np.linspace(-6,6,n)
+    z = torch.Tensor(list(itertools.product(z_range, repeat=z_dim)))
+    t1 = torch.ones(n**z_dim,1)
+    t0 = torch.zeros(n**z_dim,1)
+    ypred1 = torch.sigmoid(model.decoder(z,t1)[2]).detach().numpy().squeeze()
+    ypred0 = torch.sigmoid(model.decoder(z,t0)[2]).detach().numpy().squeeze()
+    p_y_dot1 = np.sum(ypred1 * np.product(scipy.stats.norm.pdf(z),1))*box_width**z_dim
+    p_y_dot0 = np.sum(ypred0 * np.product(scipy.stats.norm.pdf(z),1))*box_width**z_dim
+    return p_y_dot1 - p_y_dot0
+        
+    
+
 def avg_causal_L1_dist(model, c_yt, c_yz, s_y, c_t, s_t, c_x, p_y_zt_nn, n=100, lim=6):
     """Calculates
     ∫|𝑃(𝑦|𝑑𝑜(𝑡),𝑃𝑡𝑟𝑢𝑒(𝑦|𝑑𝑜(𝑡))|𝐿1𝑃(𝑡)𝑑𝑡
