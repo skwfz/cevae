@@ -150,8 +150,8 @@ def modelITE(model, x, p_y_xt_f, p_t_x_f):
     """model is the dummyCEVAE model and x is a torch tensor.
     p_y_xt_f and p_t_x_f can be the true values got from the data generating distribution, 
     if we don't want to take in to account the error of estimating those."""
-    ones = torch.ones((x.shape[0],1))
-    zeros = torch.zeros((x.shape[0],1))
+    ones = torch.ones((x.shape[0],1), device=model.device)
+    zeros = torch.zeros((x.shape[0],1), device=model.device)
     
     #Set up probabilities q(z|x,t,y) and q(t,y|x)
     q_z_t1y1x = torch.sigmoid(model.encoder(x,t=ones,y=ones)[2])
@@ -169,9 +169,9 @@ def modelITE(model, x, p_y_xt_f, p_t_x_f):
     for x0,x1 in combinations_2:
         q_t_x[x0][x1] = torch.ones((x.shape[0], 1)) * p_t_x_f(x0,x1)
     
-    #calculating proxy_ITE and q(z|x)
-    q_z_x = torch.zeros((x.shape[0], 1))
-    for x0,x1 in combinations_2:
+    #calculating q(z|x)
+    q_z_x = torch.zeros((x.shape[0], 1),device=model.device)
+    for x0,x1 in itertools.product([0,1],repeat=2):
         q_z_x += ( q_z_t1y1x * q_y_xt[x0][x1][1] * q_t_x[x0][x1] \
                 + q_z_t0y1x * q_y_xt[x0][x1][0] * (1-q_t_x[x0][x1]) \
                 + q_z_t1y0x * (1-q_y_xt[x0][x1][1]) * q_t_x[x0][x1] \
@@ -188,12 +188,12 @@ def modelITE(model, x, p_y_xt_f, p_t_x_f):
 
 def proxyITE(x, q_y_xt_f):
     """Estimates the ITE for x given the function q_y_xt_f, which estimates P(y=1|X,t) """
-    proxy_ITE = torch.zeros((x.shape[0],1))
+    proxy_ITE = torch.zeros((x.shape[0],1), device=x.device)
     
     #Setting up probabilities q(y|x,t)
     q_y_xt = [[[0,0],[0,0]],[[0,0],[0,0]]]#order x0, x1, t: q_y_xt[x0][x1][t]
     for x0,x1,t in itertools.product([0,1],repeat=3):
-        q_y_xt[x0][x1][t] = torch.ones((x.shape[0], 1)) * q_y_xt_f(x0,x1,t)
+        q_y_xt[x0][x1][t] = torch.ones((x.shape[0], 1), device=x.device) * q_y_xt_f(x0,x1,t)
     
     #calculating proxy_ITE
     q_z_x = torch.zeros((x.shape[0], 1))
@@ -231,7 +231,7 @@ def getJointDistributions(sample_data, df, prob_df):
     dist_true = []
     
     for combination in combinations:
-        VAEmatches = torch.ones(len(sample_data),1).bool()
+        VAEmatches = torch.ones(len(sample_data),1, device=sample_data.device).bool()
         datamatches = pd.Series(np.ones(len(df))).astype('bool')
         truematches = pd.Series(np.ones(len(prob_df))).astype('bool')
         for i in range(len(labels)):
@@ -251,18 +251,22 @@ def getJointDistributions(sample_data, df, prob_df):
     
     return dist_VAE, dist_data, dist_true
 
+def get_x_given_z(df):
+    P_xx = np.zeros((2,2))
+    Q_zx = np.zeros((2,2))
+
 """---------------------Running CEVAE code------------------------"""
 
-def kld_loss_bernoulli(logits):
+def kld_loss_bernoulli(logits, prior=0.5):
     # Assumes that the prior p(z=1) = 0.5
     probs = torch.sigmoid(logits)
     #kld = -(torch.log(probs) + torch.log(1-probs) - 2*np.log(0.5)).sum()
-    kld = (probs*torch.log(2*probs) + (1-probs)*torch.log(2*(1-probs))).sum()
+    kld = (probs*torch.log(probs/prior) + (1-probs)*torch.log((1-probs)/(1-prior))).sum()
     return kld
 
 def run_cevae(num_epochs, lr_start, lr_end, train_loader, test_loader, input_dim, z_dim=1, z_mode='binary',
-              x_mode='binary', device='cpu', plot_curves=True, print_logs=True):
-    model = dummyCEVAE(input_dim)
+              x_mode='binary', device='cpu', plot_curves=True, print_logs=True, learn_pz=False):
+    model = dummyCEVAE(input_dim, device=device,learn_pz=learn_pz)
     optimizer = Adam(model.parameters(), lr=lr_start)
 
     def _prepare_batch(batch):
@@ -285,11 +289,14 @@ def run_cevae(num_epochs, lr_start, lr_end, train_loader, test_loader, input_dim
         x, t, yf = _prepare_batch(batch)
         
         if len(x.shape) == 1:
-            print("Shapes in process_function: {} {} {}".format(x.shape, t.shape, y.shape))
-        ( z_logits, x_logits0, x_logits1, t_logits0, 
-             t_logits1, y_logits0, y_logits1 ) = model(x,t,yf)
-        
-        kld = kld_loss_bernoulli(z_logits)
+            print("Shapes in process_function: {} {} {}".format(x.shape, t.shape, yf.shape))
+
+        (z_logits, x_logits0, x_logits1, t_logits0, 
+             t_logits1, y_logits0, y_logits1, pz_logit) = model(x,t,yf)
+        if learn_pz:
+            kld = kld_loss_bernoulli(z_logits, prior=torch.sigmoid(pz_logit))
+        else:
+            kld = kld_loss_bernoulli(z_logits)
         z_probs = torch.sigmoid(z_logits)
         t_loss = -(z_probs*dist.Bernoulli(logits=t_logits1).log_prob(t) + 
                     (1-z_probs)*dist.Bernoulli(logits=t_logits0).log_prob(t)).sum()
@@ -314,10 +321,23 @@ def run_cevae(num_epochs, lr_start, lr_end, train_loader, test_loader, input_dim
         model.eval()
         with torch.no_grad():
             x, t, yf = _prepare_batch(batch)
-            #How should the model be operated during test time? Technically we're not allowed to use
-            #t or yf. 
             (z_logits, x_logits0, x_logits1, t_logits0, 
-             t_logits1, y_logits0, y_logits1) = model(x,t,yf)#Do we need this for anything?
+                t_logits1, y_logits0, y_logits1, pz_logit) = model(x,t,yf)#Do we need this for anything?
+            
+            
+            if learn_pz:
+                kld = kld_loss_bernoulli(z_logits, prior=torch.sigmoid(pz_logit))
+            else:
+                kld = kld_loss_bernoulli(z_logits)
+            z_probs = torch.sigmoid(z_logits)
+            t_loss = -(z_probs*dist.Bernoulli(logits=t_logits1).log_prob(t) + 
+                        (1-z_probs)*dist.Bernoulli(logits=t_logits0).log_prob(t)).sum()
+            yf_loss = -(z_probs*dist.Bernoulli(logits=y_logits1).log_prob(yf) + 
+                        (1-z_probs)*dist.Bernoulli(logits=y_logits0).log_prob(yf)).sum()
+            x_loss = -(z_probs*dist.Bernoulli(logits=x_logits1).log_prob(x) + 
+                        (1-z_probs)*dist.Bernoulli(logits=x_logits0).log_prob(x)).sum()
+            #Is the x loss OK if x has 2 dimensions?
+            tr_loss = x_loss + t_loss + yf_loss + kld
             
             #ITE inference
             E_y_x_do1, E_y_x_do0 = 0,0#model.evaluate_batch(x)
@@ -329,7 +349,8 @@ def run_cevae(num_epochs, lr_start, lr_end, train_loader, test_loader, input_dim
                 "y_logits0":y_logits0, "y_logits1":y_logits1, "yf":yf,
                 "x_logits0":x_logits0, "x_logits1":x_logits1,"x":x,
                 "t_logits0":t_logits0, "t_logits1":t_logits1, "t":t,
-                "z_logits":z_logits
+                "z_logits":z_logits, "pz_logit": pz_logit, "total_loss":tr_loss,
+                "t_loss":t_loss, "yf_loss":yf_loss, "x_loss":x_loss, "kld":kld
             }
 
     trainer = Engine(process_function)
@@ -343,27 +364,40 @@ def run_cevae(num_epochs, lr_start, lr_end, train_loader, test_loader, input_dim
     trainer.add_event_handler(Events.EPOCH_COMPLETED, scheduler)
 
     # eval_metrics
-    eval_metrics = {
-        # PEHE is defined as ((y1 - y0)_true - (y1 - y0)_pred)**2 .mean() for each patient
-        "pehe": ignite_metrics.Average(
-           output_transform=lambda x: (x["ITE_x"] - (x["y1"] - x["y0"])).pow(2).mean()),
-        "mae_ate": ignite_metrics.Average(
-           output_transform=lambda x: ((x["ITE_x"] - (x["y1"] - x["y0"])).mean())),
-        "y_reconc_loss": ignite_metrics.Average(
-            output_transform=lambda x: bernoulli_E_loss(x["z_logits"],x["y_logits0"],x["y_logits1"], x["yf"])),
-        "t_reconc_loss": ignite_metrics.Average(
-            output_transform=lambda x: bernoulli_E_loss(x["z_logits"],x["t_logits0"],x["t_logits1"], x["t"]))
-    }
-    eval_metrics['x_reconc_loss'] = ignite_metrics.Average(
-        output_transform=lambda x: bernoulli_E_loss(x["z_logits"],x["x_logits0"],x["x_logits1"], x["x"]))
-
-    eval_metrics['kld_loss'] = ignite_metrics.Average(
-        output_transform=lambda x: kld_loss_bernoulli(x["z_logits"]))
+    #eval_metrics = {
+    #    # PEHE is defined as ((y1 - y0)_true - (y1 - y0)_pred)**2 .mean() for each patient
+    #    "pehe": ignite_metrics.Average(
+    #       output_transform=lambda x: (x["ITE_x"] - (x["y1"] - x["y0"])).pow(2).mean()),
+    #    "mae_ate": ignite_metrics.Average(
+    #       output_transform=lambda x: ((x["ITE_x"] - (x["y1"] - x["y0"])).mean())),
+    #    "y_reconc_loss": ignite_metrics.Average(
+    #        output_transform=lambda x: bernoulli_E_loss(x["z_logits"],x["y_logits0"],x["y_logits1"], x["yf"])),
+    #    "t_reconc_loss": ignite_metrics.Average(
+    #        output_transform=lambda x: bernoulli_E_loss(x["z_logits"],x["t_logits0"],x["t_logits1"], x["t"])),
+    #    "tr_loss": ignite_metrics.Average(
+    #    output_transform=lambda x: x['tr_loss'])
+    #}
+    #eval_metrics['x_reconc_loss'] = ignite_metrics.Average(
+    #    output_transform=lambda x: bernoulli_E_loss(x["z_logits"],x["x_logits0"],x["x_logits1"], x["x"]))
+#
+    #eval_metrics['kld_loss'] = ignite_metrics.Average(
+    #    output_transform=lambda x: kld_loss_bernoulli(x["z_logits"], torch.sigmoid(x["pz_logit"])) if learn_pz else kld_loss_bernoulli(x["z_logits"]))
+    eval_metrics = {"total_loss": ignite_metrics.Average(
+            output_transform=lambda x: x['total_loss']),
+                   "y_reconc_loss": ignite_metrics.Average(
+            output_transform=lambda x: x['yf_loss']),
+                   "x_reconc_loss": ignite_metrics.Average(
+            output_transform=lambda x: x['x_loss']),
+                   "t_reconc_loss": ignite_metrics.Average(
+            output_transform=lambda x: x['t_loss']),
+                   "kld_loss": ignite_metrics.Average(
+            output_transform=lambda x: x['kld'])}
     
-    eval_metrics['total_loss'] = (eval_metrics["y_reconc_loss"] + 
-                                  eval_metrics["x_reconc_loss"] + 
-                                  eval_metrics["t_reconc_loss"] + 
-                                  eval_metrics["kld_loss"])
+    
+    #eval_metrics['total_loss'] = (eval_metrics["y_reconc_loss"] + 
+    #                              eval_metrics["x_reconc_loss"] + 
+    #                              eval_metrics["t_reconc_loss"] + 
+    #                              eval_metrics["kld_loss"])
 
     for eval_engine in [evaluator, train_evaluator]:
         for name, metric in eval_metrics.items():
@@ -389,8 +423,6 @@ def run_cevae(num_epochs, lr_start, lr_end, train_loader, test_loader, input_dim
                 lr = param_group['lr']
 
         print_str = f"{mode} Results - Epoch {trainer.state.epoch} - "+\
-                    f"PEHE: {metrics['pehe']:.4f} " +\
-                    f"MAE ATE: {metrics['mae_ate']:.4f} " +\
                     f"y_reconc_loss: {metrics['y_reconc_loss']:.4f} " +\
                     f"x_reconc_loss: {metrics['x_reconc_loss']:.4f} " +\
                     f"t_reconc_loss: {metrics['t_reconc_loss']:.4f} " +\
@@ -434,19 +466,8 @@ def run_cevae(num_epochs, lr_start, lr_end, train_loader, test_loader, input_dim
             ax[1, 1].set_ylabel('t_reconc_loss')
             ax[1, 1].set_title('t_reconc_loss')
 
-            #fig, ax = plt.subplots(1, 2, figsize=(12, 6))
-            sns.lineplot(x=range(num_epochs), y=tr_metrics_history['pehe'], ax=ax[2, 0], err_style=None, label='training')
-            ax[2, 0].set_xlabel('Epochs')
-            ax[2, 0].set_ylabel('PEHE')
-            ax[2, 0].set_title('PEHE')
-
-            sns.lineplot(x=range(num_epochs), y=tr_metrics_history['mae_ate'], ax=ax[2, 1], err_style=None, label='training')
-            ax[2, 1].set_xlabel('Epochs')
-            ax[2, 1].set_ylabel('MAE ATE')
-            ax[2, 1].set_title('ATE')
-
             sns.lineplot(x=range(num_epochs), y=tr_metrics_history['kld_loss'], ax=ax[4, 0], err_style=None, label='training')
-            ax[4, 0].set_xlabel('Epochs')
-            ax[4, 0].set_ylabel('kld_loss')
-            ax[4, 0].set_title('kld_loss')
+            ax[2, 0].set_xlabel('Epochs')
+            ax[2, 0].set_ylabel('kld_loss')
+            ax[2, 0].set_title('kld_loss')
     return model

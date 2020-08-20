@@ -140,6 +140,7 @@ class Decoder(nn.Module):
         self.z_dim = 1
         self.x_mode = x_mode
         self.z_mode = z_mode
+        self.device = device
 
         # p(x|z) old, for the normal case
         self.hidden_x_nn = DiagNormalNet(
@@ -155,6 +156,8 @@ class Decoder(nn.Module):
         # p(y|t,z)
         self.y0_nn = nn.Linear(1,1)
         self.y1_nn = nn.Linear(1,1)
+        
+        self.to(device)
 
     def forward(self, z, t):
         xloc = 0
@@ -163,7 +166,7 @@ class Decoder(nn.Module):
         if self.x_mode == 'normal':
             xloc, xscale = self.hidden_x_nn.forward(z) #<*- will be loc, scale
         elif self.x_mode == 'binary':
-            x_logits = torch.zeros(z.shape[0], self.input_dim)
+            x_logits = torch.zeros(z.shape[0], self.input_dim, device=self.device)
             for i in range(self.input_dim):
                 x_logits[:,i] = self.hidden_x_nns_binary[i](z)[:,0]
         t_logits = self.treatment_logits_nn(z)
@@ -178,18 +181,18 @@ class Decoder(nn.Module):
             y_logits
         )
     
-    def sample(self,size):
+    def sample(self,size,pz=torch.Tensor([0.5])):
         #Create a sample (z,x,t,y) according to the learned joint distribution
-        """TODO: probably doesn't work for this dummy model"""
+        pz.to(self.device)
         if self.z_mode == "normal":
             z_sample = torch.randn((size,self.z_dim))
         elif self.z_mode == "binary":
-            z_sample = dist.Bernoulli(torch.Tensor([0.5])).sample((size,))
+            z_sample = dist.Bernoulli(pz).sample((size,)).to(self.device)
         if self.x_mode == "normal":
             x_loc, x_var = self.hidden_x_nn(z_sample)
             x_sample = torch.randn((size,self.input_dim))*torch.sqrt(x_var) + x_loc
         elif self.x_mode == "binary":
-            x_logits = torch.zeros(size, self.input_dim)
+            x_logits = torch.zeros(size, self.input_dim, device=self.device)
             for i in range(self.input_dim):
                 x_logits[:,i] = self.hidden_x_nns_binary[i](z_sample)[:,0]
             x_sample = dist.Bernoulli(torch.sigmoid(x_logits)).sample()
@@ -216,6 +219,7 @@ class Encoder(nn.Module):
         self.input_dim = input_dim
         self.z_dim = z_dim
         self.z_mode = z_mode
+        self.device = device
         
         self.dummycombinations = 2**(input_dim+1)
         self.q_z_dummies = nn.ModuleList([nn.Linear(1,1) for i in range(self.dummycombinations)])
@@ -232,25 +236,25 @@ class Encoder(nn.Module):
         self.q_z1_nn = DiagNormalNet(
             [hidden_dim, z_dim]
         )
-        #self.q_z0_nn_binary = BernoulliNet([hidden_dim])#The situation is a bit funny in the complete binary case, but I guess we can continue using the same architecture
-        #self.q_z1_nn_binary = BernoulliNet([hidden_dim])
+        self.to(device)
 
     def forward(self, x, t, y):#Should take as inputs the obs. t and y
         # q(z|x,t,y) <- here we should have obs. t and y, otherwise maybe ok
-        hqz = self.q_z_nn.forward(torch.cat((x, y), 1))
+        
+        #hqz = self.q_z_nn.forward(torch.cat((x, y), 1))
         z_mu = 0
         z_var = 0
-        z_logits = torch.zeros((x.shape[0], 1))
+        z_logits = torch.zeros((x.shape[0], 1), device=self.device)
         if self.z_mode == 'normal':
             loc0, scale0 = self.q_z0_nn(hqz)
             loc1, scale1 = self.q_z1_nn(hqz)
             z_mu = t*loc1 + (1-t)*loc0#torch.where(t == 1, loc1, loc0)
             z_var = t*scale1 + (1-t)*scale0#torch.where(t == 1, scale1, scale0)
         elif self.z_mode == 'binary':
-            combs = [[int(k) for k in seq] for seq in itertools.product("01", repeat=self.input_dim+1)]#All t, x combinations
+            combs = list(itertools.product([0,1], repeat=self.input_dim+1))#All t, x combinations
             for i in range(self.dummycombinations):
-                t_c = torch.Tensor(combs[i][0:1])
-                x_c = torch.Tensor(combs[i][1:])
+                t_c = torch.Tensor(combs[i][0:1]).to(self.device)
+                x_c = torch.Tensor(combs[i][1:]).to(self.device)
                 #This should pick one from the loop and nothing else for each unit in the input sample
                 correct_network = (t_c==t).double() * (x==x_c).double().prod(1).unsqueeze(1)
                 z_logits = z_logits + self.q_z_dummies[i](y)*correct_network
@@ -319,7 +323,8 @@ class dummyCEVAE(nn.Module):
         device='cpu',
         t_z_layers = 0, #this should also be unnecessary
         z_mode='binary',
-        x_mode='binary'
+        x_mode='binary',
+        learn_pz = False
     ):
         super().__init__()
         
@@ -328,6 +333,8 @@ class dummyCEVAE(nn.Module):
         self.z_dim = z_dim
         self.z_mode = z_mode
         self.x_mode = x_mode
+        self.learn_pz = learn_pz
+        self.device = device
 
         self.encoder = Encoder(
             input_dim, 
@@ -335,7 +342,8 @@ class dummyCEVAE(nn.Module):
             num_hidden,
             activation,
             z_dim,
-            z_mode=z_mode
+            z_mode=z_mode,
+            device=device
         )
         self.decoder = Decoder(# <- TODO: need to add the new inputs
             input_dim, 
@@ -345,8 +353,10 @@ class dummyCEVAE(nn.Module):
             z_dim,
             t_z_layers=t_z_layers,
             z_mode=z_mode,
-            x_mode=x_mode
+            x_mode=x_mode,
+            device=device
         )
+        self.pz_logit = nn.Parameter(torch.FloatTensor([0.0]).to(device))
 
         self.to(device)
         self.float()
@@ -374,12 +384,10 @@ class dummyCEVAE(nn.Module):
         z_mean, z_var, z_logits = self.encoder.forward(x, t, y)
         if self.z_mode == 'binary':
             #We want the values decoder values for both z inputs
-            z0 = torch.zeros((x.shape[0], 1))
-            z1 = torch.ones((x.shape[0], 1))
+            z0 = torch.zeros((x.shape[0], 1), device=self.device)
+            z1 = torch.ones((x.shape[0], 1), device=self.device)
             (x_mean0, x_var0, x_logits0, t_logits0,
                 y_logits0) = self.decoder(z0,t)
             (x_mean1, x_var1, x_logits1, t_logits1,
                 y_logits1) = self.decoder(z1,t)
-        return (
-            z_logits, x_logits0, x_logits1, t_logits0, t_logits1, y_logits0, y_logits1
-        )
+        return (z_logits, x_logits0, x_logits1, t_logits0, t_logits1, y_logits0, y_logits1, self.pz_logit)
