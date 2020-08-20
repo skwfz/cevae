@@ -9,19 +9,33 @@ def linear_data_df(num_samples, c_x, c_t, c_yz, c_yt, s_x, s_t, s_y):
     For each x: z -c_x-> x+e_x
     For t: z -c_t-> t+e_t
     For y: z -c_yz-> y+e_y <-c_yt- t"""
+    x_dim = len(c_x)
     z = np.random.standard_normal((num_samples,1))
     x = np.random.normal(np.tile(c_x, (num_samples,1))*z,
-                         np.tile(s_x, (num_samples,1)),(num_samples, 2))
+                         np.tile(s_x, (num_samples,1)),(num_samples, x_dim))
     t = np.random.normal(np.tile(c_t, (num_samples,1))*z,
                          np.tile(s_t, (num_samples,1)),(num_samples, 1))
     y = np.random.normal(np.tile(c_yz, (num_samples,1))*z + np.tile(c_yt, (num_samples,1))*t,
                         np.tile(s_y, (num_samples,1)), (num_samples, 1))
     
-    x_dim = len(c_x)
     df = pd.DataFrame(np.concatenate([z,x,t,y], axis=1), 
                       columns=['z'] + ['x{}'.format(i) for i in range(x_dim)] + ['t','y'])
     return df
 
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
+
+def linear_data_binary_ty_df(num_samples, c_x, s_x, t_a, t_b, y_a0, y_b0, y_a1, y_b1):
+    z = np.random.standard_normal((num_samples,1))
+    x = np.random.normal(np.tile(c_x, (num_samples,1))*z,
+                         np.tile(s_x, (num_samples,1)),(num_samples, 2))
+    t = (np.random.random((num_samples, 1)) < sigmoid(t_a*z + t_b)).astype(int)
+    y = (np.random.random((num_samples, 1)) < sigmoid(y_a1*z + y_b1)).astype(int)*t \
+        + (np.random.random((num_samples, 1)) < sigmoid(y_a0*z + y_b0)).astype(int)*(1-t)
+    x_dim = len(c_x)
+    df = pd.DataFrame(np.concatenate([z,x,t,y], axis=1), 
+                      columns=['z'] + ['x{}'.format(i) for i in range(x_dim)] + ['t','y'])
+    return df
 
 # Define pytorch datasets and loaders
 class LinearDataset(Dataset):
