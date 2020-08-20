@@ -49,7 +49,7 @@ class Decoder(nn.Module):
     ):
         super().__init__()
         self.input_dim = input_dim
-        self.z_dim = 1
+        self.z_dim = z_dim
         self.device = device
         self.binary_t_y = binary_t_y
         self.p_y_zt_nn = p_y_zt_nn
@@ -148,12 +148,13 @@ class Decoder(nn.Module):
         #Create a sample (z,x,t,y) according to the learned joint distribution
         # TODO: outdated
         z_sample = torch.randn((size,self.z_dim))
-        x_pred = torch.zeros(size, self.input_dim, device=self.device)
+        print(z_sample.size)
+        x_sample = torch.zeros(size, self.input_dim, device=self.device)
         for i in range(self.input_dim):
-            x_pred[:,i] = self.x_nns_binary[i](z_sample)[:,0] + \
-                torch.randn((size, self.input_dim))*torch.exp(self.x_log_std[i])
+            x_sample[:,i] = self.x_nns[i](z_sample)[:,0] + \
+                torch.randn(size)*torch.exp(self.x_log_std[i])
         
-        if binary_t_y:
+        if self.binary_t_y:
             t_logits = self.treatment_pred(z_sample)
             t_sample = dist.Bernoulli(torch.sigmoid(t_logits)).sample()
             y_logits0 = self.y0_nn(z_sample)
@@ -161,7 +162,7 @@ class Decoder(nn.Module):
             y_logits = y_logits1*t_sample + y_logits0*(1-t_sample)
             y_sample = dist.Bernoulli(torch.sigmoid(y_logits)).sample()
         else:
-            t_sample = self.treatment_pred(z_sample) + torch.randn((size,1))*torch.exp(self.t_log_std)
+            t_sample = self.t_nn(z_sample) + torch.randn((size,1))*torch.exp(self.t_log_std)
             y_sample = self.y_nn(torch.cat([z_sample,t_sample],axis=1)) + torch.randn((size,1))*torch.exp(self.y_log_std)
         
         return z_sample, x_sample, t_sample, y_sample
