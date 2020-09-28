@@ -64,6 +64,12 @@ def linear_binary_ty_ate(p_y_zt1_func, p_y_zt0_func):
     p_y_dot0,_ = scipy.integrate.quad(lambda z: scipy.stats.norm.pdf(z)*p_y_zt0_func(z), -np.inf, np.inf)
     return p_y_dot1 - p_y_dot0
 
+def linear_binary_ty_pydot(p_y_zt1_func, p_y_zt0_func):
+    """The same as linear_binary_ty_ate but returns the actual p(y|do(t)) values"""
+    p_y_dot1,_ = scipy.integrate.quad(lambda z: scipy.stats.norm.pdf(z)*p_y_zt1_func(z), -np.inf, np.inf)
+    p_y_dot0,_ = scipy.integrate.quad(lambda z: scipy.stats.norm.pdf(z)*p_y_zt0_func(z), -np.inf, np.inf)
+    return p_y_dot1, p_y_dot0
+
 def linear_binary_ty_ate_2(p_y_zt1_func, p_y_zt0_func):
     """Same as linear_binary_ty_ate but uses the trapezoidal rule directly. Probably less issues than with scipy."""
     n = 10000
@@ -190,16 +196,65 @@ def avg_causal_L1_dist_general(model, c_yt, c_yz, s_y, c_t, s_t, c_x, n=100, lim
     avg_causal_dist = (causal_dist * pt_true).sum()*t_len
     return avg_causal_dist, py_dot_model, py_dot_true, y_range, t_range, pt_true
 
-def run_model_for_data_sets(datasizes, datasize_times, num_epochs,
+def avg_causal_L1_dist_MC(model, c_yt, c_yz, s_y, c_t, s_t, c_x, n=100, lim=6, nsample=10000):
+    """Calculates
+    ∫|𝑃(𝑦|𝑑𝑜(𝑡),𝑃𝑡𝑟𝑢𝑒(𝑦|𝑑𝑜(𝑡))|𝐿1𝑃(𝑡)𝑑𝑡
+    for the model with continuous t and y, using MC integration for p(y|do(t))"""
+    t_range = np.linspace(-lim,lim,n)
+    y_range = np.linspace(-lim,lim,n)
+    z_range = np.linspace(-lim,lim,n)
+    z_len = 2*lim/n
+    y_len = 2*lim/n
+    t_len = 2*lim/n
+    #First calculate the true P(t) function
+    #P(t|z)
+    pt_z_mean_true = c_t*z_range
+    pt_z_std_true = s_t
+    #P(t)
+    pt_true = (scipy.stats.norm.pdf(z_range[:,None])*scipy.stats.norm.pdf(t_range[None,:], pt_z_mean_true[:,None],pt_z_std_true)).sum(axis=0)*z_len#shape (t_range,)
+    #P(y|do(t)) for the model
+    py_dot_model = np.zeros((n,n))#shape (t_range, y_range)
+    py_zt_std_model = torch.exp(model.decoder.y_log_std).detach().numpy()
+    for i,t in enumerate(t_range):
+        z_sample = dist.Normal(0,1).sample((nsample,model.z_dim))
+        zt = torch.cat([z_sample,torch.ones(nsample,1)*t],1)
+        if model.decoder.p_y_zt_nn:
+            if model.decoder.p_y_zt_std:
+                py_zt_res_model = model.decoder.y_nn_real(zt).detach().numpy()
+                py_zt_mean_model = py_zt_res_model[:,0]
+                py_zt_std_model = np.exp(py_zt_res_model[:,1][:,None])
+            else:
+                py_zt_mean_model = model.decoder.y_nn_real(zt).detach().numpy().squeeze()
+        else:
+            py_zt_mean_model = model.decoder.y_nn(zt).detach().numpy().squeeze()
+        py_zt_model = scipy.stats.norm.pdf(y_range[None,:], py_zt_mean_model[:,None], py_zt_std_model)
+        py_dot_model[i,:] = py_zt_model.mean(0)
+        
+    #P(y|do(t)) for the true distribution
+    py_zt_mean_true = c_yz*z_range[:,None] + c_yt*t_range[None,:]
+    py_zt_std_true = s_y
+    py_dot_true = np.zeros((n,n))
+    for y_index in range(n):
+        py_zt_true = scipy.stats.norm.pdf(y_range[y_index], py_zt_mean_true, py_zt_std_true)#shape (z_range, t_range)
+        py_dot_true[:,y_index] = (py_zt_true * scipy.stats.norm.pdf(z_range[:,None])).sum(axis=0)*z_len
+    
+    #The average distances between P_model(y|do(t)) and P_true(y|do(t))
+    causal_dist = np.abs(py_dot_model - py_dot_true).sum(axis=1)*y_len#shape (t_range)
+    avg_causal_dist = (causal_dist * pt_true).sum()*t_len
+    return avg_causal_dist, py_dot_model, py_dot_true, y_range, t_range, pt_true
+
+def run_model_for_data_sets(datasize, datasize_times, num_epochs,
                             lr_start, lr_end, input_dim, z_dim, folder,name, BATCH_SIZE,
                             binary_t_y, p_y_zt_nn, q_z_xty_nn,
                             generate_df, dataparameters, track_function, true_value,
                             device='cpu', p_x_z_nn=False, p_t_z_nn=False, p_y_zt_std=False, p_x_z_std=False,
                             p_t_z_std=False, decoder_hidden_dim=3, decoder_num_hidden=3,
-                            encoder_hidden_dim=4, encoder_num_hidden=3,):
+                            encoder_hidden_dim=4, encoder_num_hidden=3,labels=None):
     """Runs the model for different sample sizes multiple times for each size. Saves the results in data/{folder}.
     Currently just empties everything in the folder, but we also have the parameter 'name' to save the results of 
-    different experiments in the same folder, if we happen to need that. """
+    different experiments in the same folder, if we happen to need that. 
+    If labels is not None, then we iterate len(labels) times instead of len(datasize). This allows to loop
+    e.g. over different values of z_dim. (has to match with labels)"""
     try:
         os.mkdir("data/{}/".format(folder))
     except OSError:
@@ -208,19 +263,25 @@ def run_model_for_data_sets(datasizes, datasize_times, num_epochs,
         for f in files:
             os.remove(f)
     
+    if labels is None:
+        labels = datasize
     if not isinstance(num_epochs, list):
-        num_epochs = datasize_times*[num_epochs]
+        num_epochs = len(labels)*[num_epochs]
     if not isinstance(lr_start, list):
-        lr_start = datasize_times*[lr_start]
+        lr_start = len(labels)*[lr_start]
     if not isinstance(lr_end, list):
-        lr_end = datasize_times*[lr_end]
+        lr_end = len(labels)*[lr_end]
+    if not isinstance(z_dim, list):
+        z_dim = len(labels)*[z_dim]
+    if not isinstance(datasize, list):
+        datasize = len(labels)*[datasize]
     
     i,j = 0,0
-    dfs = {datasize: {} for datasize in datasizes}
-    models = {datasize: {} for datasize in datasizes}
-    while i < len(datasizes):
+    dfs = {label: {} for label in labels}
+    models = {label: {} for label in labels}
+    while i < len(labels):
         while j < datasize_times:
-            num_samples = datasizes[i]
+            num_samples = datasize[i]
             print("Training data size {}, run {}".format(num_samples, j+1))
             df = generate_df(num_samples, *dataparameters)
             dataset = LinearDataset(df)
@@ -230,7 +291,7 @@ def run_model_for_data_sets(datasizes, datasize_times, num_epochs,
             test_loader, _ = LinearDataLoader(LinearDataset(df[:1]), validation_split=0.0).get_loaders(batch_size=1)
             #Running the model
             model = run_cevae(num_epochs=num_epochs[i], lr_start=lr_start[i], lr_end=lr_end[i],
-                train_loader=train_loader, test_loader=test_loader, input_dim=input_dim, z_dim=z_dim,
+                train_loader=train_loader, test_loader=test_loader, input_dim=input_dim, z_dim=z_dim[i],
                 plot_curves=False, print_logs=False, device=device,
                 binary_t_y=binary_t_y, p_y_zt_nn=p_y_zt_nn, q_z_xty_nn=q_z_xty_nn,
                 p_x_z_nn = p_x_z_nn, p_t_z_nn = p_t_z_nn, p_y_zt_std = p_y_zt_std,
@@ -238,11 +299,11 @@ def run_model_for_data_sets(datasizes, datasize_times, num_epochs,
                 decoder_num_hidden=decoder_num_hidden, encoder_hidden_dim=encoder_hidden_dim, 
                 encoder_num_hidden=encoder_num_hidden)
 
-            dfs[num_samples][j] = df
-            models[num_samples][j] = model
+            dfs[labels[i]][j] = df
+            models[labels[i]][j] = model
 
-            torch.save(model.state_dict(), "./data/{}/model_{}_{}_{}".format(folder,name,num_samples,j))
-            df.to_pickle("./data/{}/data_{}_{}_{}".format(folder,name,num_samples,j))
+            torch.save(model.state_dict(), "./data/{}/model_{}_{}_{}".format(folder,name,labels[i],j))
+            df.to_pickle("./data/{}/data_{}_{}_{}".format(folder,name,labels[i],j))
             print("Estimated causal effect: {} true value: {}".format(track_function(model), true_value))
             j += 1
         j = 0
@@ -415,9 +476,9 @@ def run_cevae(num_epochs, lr_start, lr_end, train_loader, test_loader, input_dim
     @trainer.on(Events.EPOCH_COMPLETED)
     def run_validation(engine):
         if device == "cuda":
-            torch.cuda.synchronize()
+            torch.cuda.synchronize() #TODO: What is this??
         train_evaluator.run(train_loader)
-        evaluator.run(test_loader)
+        #evaluator.run(test_loader)
 
     def handle_logs(evaluator, trainer, mode, metrics_history):
         metrics = evaluator.state.metrics

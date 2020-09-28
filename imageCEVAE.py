@@ -43,34 +43,39 @@ class Decoder(nn.Module):
         super().__init__()
         self.x_dim = x_dim
         self.device = device
+        self.p_x_z_nn = p_x_z_nn
         
         #Image generating networks
-        self.ct1 = nn.Sequential(nn.ConvTranspose2d(z_dim,4*ngf,kernel_size=4,stride=2,bias=False),nn.ReLU())
-        self.ct2 = nn.Sequential(nn.ConvTranspose2d(4*ngf,2*ngf,kernel_size=4,stride=2,padding=1,bias=False), nn.ReLU())
-        self.ct3 = nn.Sequential(nn.ConvTranspose2d(2*ngf,ngf,kernel_size=4,stride=2,padding=2,bias=False), nn.ReLU())
-        self.ct4 = nn.Sequential(nn.ConvTranspose2d(ngf,nc,kernel_size=4,stride=2,padding=1,bias=False), nn.Tanh())
+        self.lin = nn.Sequential(nn.Linear(z_dim, 20), nn.ELU())
+        self.ct1 = nn.Sequential(nn.ConvTranspose2d(20,4*ngf,kernel_size=3,stride=1,bias=False),nn.ELU())
+        self.ct2 = nn.Sequential(nn.ConvTranspose2d(4*ngf,2*ngf,kernel_size=4,stride=2,padding=1,bias=False), nn.ELU())
+        self.ct3 = nn.Sequential(nn.ConvTranspose2d(2*ngf,ngf,kernel_size=6,stride=2,padding=1,bias=False), nn.ELU())
+        self.ct4 = nn.Sequential(nn.ConvTranspose2d(ngf,nc,kernel_size=6,stride=2,padding=2,bias=False))
         self.logstd = nn.Parameter(torch.Tensor([1]))
         
         #Proxy networks
-        self.x_nn = FullyConnected([p_x_z_nn_width]*p_x_z_nn_layers + [x_dim]) if p_x_z_nn else nn.ModuleList([nn.Linear(z_dim,1, bias=False) for i in range(x_dim)])
+        self.x_nn = FullyConnected([z_dim] + p_x_z_nn_layers*[p_x_z_nn_width] + [x_dim]) if p_x_z_nn else nn.ModuleList([nn.Linear(z_dim,1, bias=False) for i in range(x_dim)])
         self.x_log_std = nn.Parameter(torch.FloatTensor(x_dim*[1.]).to(device))
         
         #Treatment network
-        self.t_nn = FullyConnected([p_t_z_nn_width]*p_t_z_nn_layers + [1]) if p_t_z_nn else nn.Linear(z_dim,1, bias=True)
+        self.t_nn = FullyConnected([z_dim] + p_t_z_nn_layers*[p_t_z_nn_width] + [1]) if p_t_z_nn else nn.Linear(z_dim,1, bias=True)
         
         #y network
-        self.y0_nn = FullyConnected([p_y_zt_nn_width]*p_y_zt_nn_layers + [1]) if p_y_zt_nn else nn.Linear(z_dim,1, bias=True)#If t and y binary
-        self.y1_nn = FullyConnected([p_y_zt_nn_width]*p_y_zt_nn_layers + [1]) if p_y_zt_nn else nn.Linear(z_dim,1, bias=True)
+        self.y0_nn = FullyConnected([z_dim] + p_y_zt_nn_layers*[p_y_zt_nn_width] + [1]) if p_y_zt_nn else nn.Linear(z_dim,1, bias=True)#If t and y binary
+        self.y1_nn = FullyConnected([z_dim] + p_y_zt_nn_layers*[p_y_zt_nn_width] + [1]) if p_y_zt_nn else nn.Linear(z_dim,1, bias=True)
 
     def forward(self,z,t):
         #z is dim (batch_size,z_dim)
-        image = self.ct1(z[:,:,None,None])
+        image = self.ct1(self.lin(z)[:,:,None,None])
         image = self.ct2(image)
         image = self.ct3(image)
         image = self.ct4(image)
-        x_pred = torch.zeros(z.shape[0], self.x_dim, device=self.device)
-        for i in range(self.x_dim):
-            x_pred[:,i] = self.x_nn[i](z)[:,0]
+        if self.p_x_z_nn:
+            x_pred = self.x_nn(z)
+        else:
+            x_pred = torch.zeros(z.shape[0], self.x_dim, device=self.device)
+            for i in range(self.x_dim):
+                x_pred[:,i] = self.x_nn[i](z)[:,0]
         t_pred = self.t_nn(z)
         y_logits0 = self.y0_nn(z)
         y_logits1 = self.y1_nn(z)
@@ -87,13 +92,14 @@ class Encoder(nn.Module):
         nc=1
     ):
         super().__init__()
-        self.c1 = nn.Sequential(nn.Conv2d(nc,ngf,kernel_size=4,stride=2,padding=1,bias=False), nn.ReLU())
-        self.c2 = nn.Sequential(nn.Conv2d(ngf,2*ngf,kernel_size=4,stride=2,padding=2,bias=False), nn.ReLU())
-        self.c3 = nn.Sequential(nn.Conv2d(2*ngf,4*ngf,kernel_size=4,stride=2,padding=1,bias=False), nn.ReLU())
-        self.c4 = nn.Sequential(nn.Conv2d(4*ngf,100,kernel_size=4,stride=2,bias=False))
-        self.fc = nn.Sequential(nn.Linear(100+x_dim+2,100),nn.ReLU())#I guess that this could be optimized somehow
-        self.mean = nn.Linear(100,z_dim)
-        self.logstd = nn.Linear(100,z_dim)
+        
+        self.c1 = nn.Sequential(nn.Conv2d(nc,ngf,kernel_size=6,stride=2,padding=2,bias=False), nn.ELU())
+        self.c2 = nn.Sequential(nn.Conv2d(ngf,2*ngf,kernel_size=6,stride=2,padding=1,bias=False), nn.ELU())
+        self.c3 = nn.Sequential(nn.Conv2d(2*ngf,4*ngf,kernel_size=4,stride=2,padding=1,bias=False), nn.ELU())
+        self.c4 = nn.Sequential(nn.Conv2d(4*ngf,40,kernel_size=3,stride=1,bias=False), nn.ELU())
+        self.fc = nn.Sequential(nn.Linear(40+x_dim+2,40),nn.ELU())#I guess that this could be optimized
+        self.mean = nn.Linear(40,z_dim)
+        self.logstd = nn.Linear(40,z_dim)
         
     
     def forward(self,image,x,t,y):
@@ -131,12 +137,21 @@ class ImageCEVAE(nn.Module):
         self.encoder = Encoder(
             x_dim,
             z_dim,
-            device=device
+            device=device,
         )
         self.decoder = Decoder(
             x_dim,
             z_dim,
-            device=device
+            device=device,
+            p_y_zt_nn=p_y_zt_nn,
+            p_y_zt_nn_layers=p_y_zt_nn_layers,
+            p_y_zt_nn_width=p_y_zt_nn_width,
+            p_t_z_nn=p_t_z_nn,
+            p_t_z_nn_layers=p_t_z_nn_layers,
+            p_t_z_nn_width=p_t_z_nn_width,
+            p_x_z_nn=p_x_z_nn,
+            p_x_z_nn_layers=p_x_z_nn_layers,
+            p_x_z_nn_width=p_x_z_nn_width
         )
         self.to(device)
         self.float()
@@ -150,7 +165,6 @@ class ImageCEVAE(nn.Module):
         z_mean, z_std = self.encoder(image, x, t, y)
         #TODO: works at least for z_dim=1, maybe errors if z_dim>1
         z = self.reparameterize(z_mean, z_std)
-        
         image, image_std, x_pred, x_std, t_pred, y_pred = self.decoder(z,t)
         
         return image, image_std, z_mean, z_std, x_pred, x_std, t_pred, y_pred

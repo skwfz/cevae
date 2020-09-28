@@ -251,6 +251,19 @@ def getJointDistributions(sample_data, df, prob_df):
     
     return dist_VAE, dist_data, dist_true
 
+def getJointDistFromDataFrame(df):
+    labels = list(df.columns)
+    combinations = itertools.product([0,1],repeat=len(labels))
+    dist_data = []
+    for combination in combinations:
+        datamatches = pd.Series(np.ones(len(df))).astype('bool')
+        for i in range(len(labels)):
+            datamatches = datamatches & (df[labels[i]]==combination[i])
+        probdata = datamatches.sum()/len(df)
+        dist_data.append(list(combination) + [probdata])
+    dist_data = pd.DataFrame(dist_data, columns=labels + ['P'])
+    return dist_data
+
 def get_x_given_z(df):
     P_xx = np.zeros((2,2))
     Q_zx = np.zeros((2,2))
