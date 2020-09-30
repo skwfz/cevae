@@ -316,8 +316,7 @@ def load_dfs_models(folder, name,
                   decoder_hidden_dim=3, decoder_num_hidden=3,
                   encoder_hidden_dim=4, encoder_num_hidden=3,
                   p_x_z_nn=False, p_t_z_nn=False, p_y_zt_std=False, p_x_z_std=False,
-                  p_t_z_std=False
-                   ):
+                  p_t_z_std=False, label=None):
     """Loads dataframes and trained models from data/{folder}/ that match the experiment name"""
     dfs = {}
     models = {}
@@ -330,6 +329,8 @@ def load_dfs_models(folder, name,
                 else:
                     dfs[int(match.group(3))][int(match.group(4))] = pd.read_pickle("data/{}/{}".format(folder,file))
             elif match.group(1) == "model":
+                if label=="z_dim":
+                    z_dim = int(match.group(3))
                 model = linearCEVAE(input_dim, z_dim, device=device, binary_t_y=binary_t_y, 
                   p_y_zt_nn=p_y_zt_nn, decoder_hidden_dim=decoder_hidden_dim, decoder_num_hidden=decoder_num_hidden, 
                   q_z_xty_nn=q_z_xty_nn, encoder_hidden_dim=encoder_hidden_dim, encoder_num_hidden=encoder_num_hidden,
