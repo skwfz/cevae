@@ -246,8 +246,6 @@ class Encoder(nn.Module):
             return z_pred, z_std
         #return z_pred, torch.mm(self.z_std.T,self.z_std)
 
-        
-        
 class linearCEVAE(nn.Module):
     def __init__(
         self, 

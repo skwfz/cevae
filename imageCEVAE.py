@@ -97,11 +97,10 @@ class Encoder(nn.Module):
         self.c2 = nn.Sequential(nn.Conv2d(ngf,2*ngf,kernel_size=6,stride=2,padding=1,bias=False), nn.ELU())
         self.c3 = nn.Sequential(nn.Conv2d(2*ngf,4*ngf,kernel_size=4,stride=2,padding=1,bias=False), nn.ELU())
         self.c4 = nn.Sequential(nn.Conv2d(4*ngf,40,kernel_size=3,stride=1,bias=False), nn.ELU())
-        self.fc = nn.Sequential(nn.Linear(40+x_dim+2,40),nn.ELU())#I guess that this could be optimized
-        self.mean = nn.Linear(40,z_dim)
-        self.logstd = nn.Linear(40,z_dim)
+        self.fc = nn.Sequential(nn.Linear(40+x_dim+2,z_dim+5),nn.ELU())#I guess that this could be optimized
+        self.mean = nn.Linear(z_dim+5,z_dim)#z_dim+5 to to avoid bottlenecks and on the other hand instability in optimization
+        self.logstd = nn.Linear(z_dim+5,z_dim)
         
-    
     def forward(self,image,x,t,y):
         temp = self.c1(image)
         temp = self.c2(temp)

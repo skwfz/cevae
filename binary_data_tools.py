@@ -43,7 +43,7 @@ def calculate_true_ate(prob_df):
                    *1/prob_df[(prob_df.z==z)&(prob_df.t==0)].P.sum()\
                    *prob_df[(prob_df.z==z)].P.sum()
     true_ate = true_py_do1 - true_py_do0
-    return true_ate
+    return true_ate, true_py_do1, true_py_do0#TODO: returning py_do has breaked some old code
 
 def calculate_proxy_ate(prob_df):
     proxy_py_do1 = 0
