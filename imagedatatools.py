@@ -16,6 +16,7 @@ import os
 import glob
 import re
 import functools
+from collections.abc import Iterable
 
 def estimate_imageCEVAE_ATE(model):
     """Uses Monte Carlo Integration"""
@@ -311,7 +312,8 @@ def run_model_for_data_sets(datasize, param_times,
                             folder, name, 
                             BATCH_SIZE, generate_data, dataparameters, track_function, true_value,
                             device, train_arguments, labels, 
-                            post_decoder_training=False, post_decoder_arguments=[], loss_scaling=1):
+                            post_decoder_training=False, post_decoder_arguments=[], loss_scaling=1,
+                           share_data_between_runs=False):
     """train_arguments is a list with the following:
     num_epochs, lr_start, lr_end, x_dim, z_dim,
     p_y_zt_nn, p_y_zt_nn_layers, p_y_zt_nn_width, 
@@ -331,6 +333,7 @@ def run_model_for_data_sets(datasize, param_times,
         files = glob.glob('data/{}/*'.format(folder))
         for f in files:
             os.remove(f)
+    assert not (isinstance(datasize,Iterable) and share_data_between_runs)#ensure that share_data_between_runs makes sense
     
     datasize = expand_parameters([datasize], labels)[0]
     train_arguments = expand_parameters(train_arguments, labels)
@@ -340,11 +343,14 @@ def run_model_for_data_sets(datasize, param_times,
     datas = {label: {} for label in labels}
     models = {label: {} for label in labels}
     losses = {label: {} for label in labels}
+    if share_data_between_runs:
+        z, images, x, t, y, dataset = generate_data(datasize[0], *dataparameters)
     for i in range(len(labels)):
         for j in range(param_times):
             num_samples = datasize[i]
             print("Training data size {}, run {}".format(num_samples, j+1))
-            z, images, x, t, y, dataset = generate_data(num_samples, *dataparameters)
+            if not share_data_between_runs:
+                z, images, x, t, y, dataset = generate_data(num_samples, *dataparameters)
             dataloader = DataLoader(dataset, batch_size=BATCH_SIZE)
             #Running the model
             model, loss = train_model('cuda', False, False, dataloader, *train_arguments[i], loss_scaling[i])
