@@ -184,7 +184,8 @@ class CEVAE(nn.Module):
         t_mode,
         y_mode,#0 for continuous (Gaussian), 2 or more for categorical distributions (usually 2 or 0)
         x_mode,#a list, 0 for continuous (Gaussian), 2 or more for categorical distributions (usually 2 or 0)
-        ty_separate_enc
+        ty_separate_enc,
+        z_mode
     ):
         super().__init__()
         
@@ -194,10 +195,14 @@ class CEVAE(nn.Module):
         self.y_mode = y_mode
         self.t_mode = t_mode
         self.x_mode = x_mode
+        self.z_mode = z_mode
+        
+        self.pz_logit = nn.Parameter(torch.FloatTensor([0.0]).to(device))#for binary z
         
         assert t_mode == 0 or t_mode > 1
         assert y_mode == 0 or y_mode > 1
         assert all([x_m == 0 or x_m > 1 for x_m in x_mode])
+        assert z_mode == 0 or z_mode == 2
         assert len(x_mode) == x_dim
         
         self.encoder = Encoder(
@@ -234,9 +239,40 @@ class CEVAE(nn.Module):
         return eps.mul(std).add_(mean)
 
     def forward(self, x, t, y):#Should have t, y
-        z_mean, z_std = self.encoder(x, t, y)
-        #TODO: works at least for z_dim=1, maybe errors if z_dim>1
-        z = self.reparameterize(z_mean, z_std)
+        z_pred, z_std = self.encoder(x, t, y)
+        if self.z_mode == 0:#if z is gaussian
+            z = self.reparameterize(z_pred, z_std)
+        if self.z_mode == 2:#if z is binary
+            #We need to pass in a large vector to have them match with different t values for y estimation
+            #Could optimize by passing x and t networks only two values but easier this way
+            z = torch.cat([torch.zeros(x.shape[0],1),torch.ones(x.shape[0],1)],0)
+            t = torch.cat([t,t],0)
         x_pred, x_std, t_pred, t_std, y_pred, y_std = self.decoder(z,t)
         
-        return z_mean, z_std, x_pred, x_std, t_pred, t_std, y_pred, y_std
+        return z_pred, z_std, x_pred, x_std, t_pred, t_std, y_pred, y_std
+    
+    def sample(self,n):
+        different_modes = list(set(self.x_mode))
+        x_same_mode_indices = dict()
+        for mode in different_modes:
+            x_same_mode_indices[mode] = [i for i,m in enumerate(self.x_mode) if m==mode]
+
+        z_sample = torch.randn(n, self.z_dim).to(self.device)
+        t_sample = dist.Bernoulli(logits=self.decoder.t_nn(z_sample)[:,[0]]).sample()#binary t
+        x_pred,x_std,t_pred,t_std,y_pred,y_std = self.decoder(z_sample, t_sample)
+        y_sample = dist.Normal(loc=y_pred, scale=y_std).sample()#Continuous y
+        x_sample = np.zeros((n, self.x_dim))
+
+        pred_i = 0#x_pred is much longer than x if x has categorical variables with more categories than 2
+        for i,mode in enumerate(self.x_mode):
+            if mode==0:
+                x_sample[:,i] = dist.Normal(loc=x_pred[:,pred_i], scale=x_std[:,pred_i]).sample().detach().numpy()
+                pred_i += 1
+            elif mode==2:
+                x_sample[:,i] = dist.Bernoulli(logits=x_pred[:,pred_i]).sample().detach().numpy()
+                pred_i += 1
+            else:
+                x_sample[:,i] = dist.Categorical(logits=x_pred[:,pred_i:pred_i+mode]).sample().detach().numpy()
+                pred_i += mode
+        
+        return z_sample, x_sample, t_sample, y_sample
