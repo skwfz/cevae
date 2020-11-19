@@ -171,6 +171,12 @@ def generatedata(num_samples, VAEmodel, ztotmodel, ATE, zvar_index):
     y = (z+ATE)*t + z*(1-t) + torch.randn(num_samples,1)
     df = pd.DataFrame(torch.cat([z,x,t,y],1).detach().numpy(),columns=["z"]+["x{}".format(i) for i in range(VAEmodel.x_dim-1)] + ["t", "y"])
     return df
+
+def rejection_sample(df, density_estimate_fun, sample_fun):
+    #Samples according to a distribution specified by sample_fun (Gaussian in practise)
+    #density_estimate_fun is a density estimate of z, sample_fun has to be below the density estimate at all points
+    include = sample_fun(df['z'].to_numpy()) / density_estimate_fun(df['z'].to_numpy()[:,None]) > np.random.random(len(df['z']))
+    return df.copy()[include]
     
 def savemodel(model, name):
     torch.save(model.state_dict(), "./datageneratormodels/{}".format(name))
