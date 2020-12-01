@@ -324,8 +324,11 @@ def train_model(device, plot_curves, print_logs,
     ax[1,0].set_title("y loss")
     ax[1,1].set_title("kld loss")
     plt.show()
+    print("Total loss in the end: ", losses['total'][-1])
     
     return model, losses
+
+#---------------------------------functions related to running larger scale experiments----------------------
 
 def expand_parameters(params, iterated):
     """Helper function to get the elements in params to be lists of len(iterated)"""
@@ -337,6 +340,134 @@ def expand_parameters(params, iterated):
             assert len(params[i]) == len(iterated)
             new_params[i] = params[i].copy()
     return new_params
+
+def create_or_empty_folder(main_folder,sub_folder):
+    try:
+        os.mkdir("./data/{}/".format(main_folder))
+    except OSError:
+        pass
+    try:
+        os.mkdir("./data/{}/{}/".format(main_folder,sub_folder))
+    except OSError:
+        print("Creation of the directory './data/{}/{}/ failed. Trying to empty the same folder.".format(main_folder,sub_folder))
+        files = glob.glob('./data/{}/{}/*'.format(main_folder, sub_folder))
+        for f in files:
+            os.remove(f)
+
+def save_dataparameters(dataparameters, main_folder, sub_folder):
+    create_or_empty_folder(main_folder,sub_folder)
+    with open("./data/{}/{}/params".format(main_folder,sub_folder), "wb") as file:
+        pickle.dump(dataparameters, file)
+
+def load_dataparameters(main_folder, sub_folder):
+    with open("./data/{}/{}/params".format(main_folder,sub_folder), "rb") as file:
+        return pickle.load(file)
+
+def create_dfs_datasets(generate_df, dataparameters, param_times, repeat, main_folder, sub_folder, labels):
+    #dataparameters has to be a list of lists, param_times is how many times we use one data parameter combination
+    #repeat is a boolean that tells whether we should use the same data
+    create_or_empty_folder(main_folder,sub_folder)
+    
+    dfs = {label: {} for label in labels}
+    datasets = {label: {} for label in labels}
+    for i,data_params in enumerate(dataparameters):
+        if repeat:
+            df = generate_df(*data_params)
+            dataset = CEVAEDataset(df)
+            #SAVE RESULTS
+            with open("./data/{}/{}/df_{}".format(main_folder, sub_folder,labels[i]), "wb") as file:
+                pickle.dump(df, file)
+            for j in range(param_times):
+                dfs[labels[i]][j] = df
+                datasets[labels[i]][j] = datasets
+        else:
+            for j in range(param_times):
+                df = generate_df(*dataparameters)
+                dataset = CEVAEDataset(df)
+                #SAVE RESULTS
+                with open("./data/{}/{}/df_{}_{}".format(main_folder, sub_folder,labels[i],j), "wb") as file:
+                    pickle.dump(df, file)
+                dfs[labels[i]][j] = df
+                datasets[labels[i]][j] = datasets
+    return dfs, datasets
+
+def load_dfs(main_folder, sub_folder, param_times=None):
+    dfs = {}
+    datasets = {}
+    for file in os.listdir("data/{}/{}/".format(main_folder, sub_folder)):
+        match = re.search(r"df_([^_]*)_(\d*)", file)
+        if match:
+            if not match.group(1) in dfs:
+                dfs[match.group(1)] = {}
+                datasets[match.group(1)] = {}
+            with open("data/{}/{}/{}".format(main_folder,sub_folder,file), "rb") as file:
+                dfs[match.group(1)][int(match.group(2))] = pickle.load(file)
+                datasets[match.group(1)][int(match.group(2))] = CEVAEDataset(dfs[match.group(1)][int(match.group(2))])
+        else:
+            match = re.search(r"df_([^_]*)", file)
+            with open("data/{}/{}/{}".format(main_folder,sub_folder,file), "rb") as file:
+                dfs[match.group(1)] = {}
+                datasets[match.group(1)] = {}
+                df =  pickle.load(file)
+                for i in range(param_times):
+                    dfs[match.group(1)][i] = df
+                    datasets[match.group(1)][i] = CEVAEDataset(df)
+    return dfs, datasets
+        
+        
+def run_model_for_predef_datasets(datasets, param_times, main_folder, sub_folder, BATCH_SIZE, track_function, true_value,
+                                  device, train_arguments, labels, data_labels):
+    #Main folder organizes related experiments with same/similar data. Sub-folder has the results from this experiment
+    #datasets can be different data for each label or the same data repeated many times, however we want
+    create_or_empty_folder(main_folder,sub_folder)
+    
+    train_arguments = expand_parameters(train_arguments, labels)
+    train_arguments = list(map(list,zip(*train_arguments))) #dim (len(iterated, len(train_arguments))
+    
+    models = {label: {} for label in labels}
+    losses = {label: {} for label in labels}
+    
+    for i in range(len(labels)):
+        for j in range(param_times):
+            dataloader = DataLoader(datasets[data_labels[i]][j], batch_size=BATCH_SIZE)
+            #Running the model
+            model, loss = train_model(device, False, False, dataloader, *train_arguments[i])
+            torch.save(model.state_dict(), "./data/{}/{}/model_{}_{}".format(main_folder,sub_folder,labels[i],j))
+            with open("./data/{}/{}/loss_{}_{}".format(main_folder,sub_folder,labels[i],j), "wb") as file:
+                pickle.dump(loss, file)
+            print("Estimated causal effect: {} true value: {}".format(track_function(model), true_value))
+            models[labels[i]][j] = model
+            losses[labels[i]][j] = loss
+    
+    return models, losses
+
+def load_models_losses(main_folder, sub_folder, train_arguments, labels, device):
+    train_arguments = expand_parameters(train_arguments, labels)
+    train_arguments = list(map(list, zip(*train_arguments)))
+    #We see only the labels in the folder, but we want the indices for accessing other arguments (train_arguments)
+    labels_to_index = dict(zip(map(str,labels), range(len(labels))))
+    models = {}
+    losses = {}
+    for file in os.listdir("data/{}/{}/".format(main_folder, sub_folder)):
+        match = re.search(r"([^_]*)_([^_]*)_(\d*)", file)
+        if match.group(1) == "model":
+            index = labels_to_index[match.group(2)]
+            num_epochs, lr_start, lr_end, x_dim, z_dim, p_y_zt_nn_layers, p_y_zt_nn_width, p_t_z_nn_layers, p_t_z_nn_width, p_x_z_nn_layers, p_x_z_nn_width, q_z_nn_layers, q_z_nn_width, t_mode, y_mode, x_mode, ty_separate_enc, z_mode = train_arguments[index]
+            model = CEVAE(x_dim, z_dim, device, p_y_zt_nn_layers, p_y_zt_nn_width, p_t_z_nn_layers,
+                          p_t_z_nn_width, p_x_z_nn_layers, p_x_z_nn_width, q_z_nn_layers, q_z_nn_width,
+                          t_mode, y_mode, x_mode, ty_separate_enc, z_mode)
+            model.load_state_dict(torch.load("data/{}/{}/{}".format(main_folder, sub_folder,file)))
+            model.eval()
+            if not match.group(2) in models:
+                models[match.group(2)] = {int(match.group(3)): model}
+            else:
+                models[match.group(2)][int(match.group(3))] = model
+        elif match.group(1) == "loss":
+            with open("data/{}/{}/{}".format(main_folder, sub_folder, file), "rb") as file:
+                if not match.group(2) in losses:
+                    losses[match.group(2)] = {}
+                losses[match.group(2)][int(match.group(3))] = pickle.load(file)
+    return models, losses
 
 def run_model_for_data_sets(datasize, param_times,
                             folder, name, 
@@ -364,7 +495,7 @@ def run_model_for_data_sets(datasize, param_times,
     
     datasize = expand_parameters([datasize], labels)[0]
     train_arguments = expand_parameters(train_arguments, labels)
-    train_arguments = list(map(list, zip(*train_arguments))) #dim (len(iterated, len(train_arguments))
+    train_arguments = list(map(list, zip(*train_arguments))) #dim (len(labels, len(train_arguments))
     
     datas = {label: {} for label in labels}
     models = {label: {} for label in labels}

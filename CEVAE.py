@@ -49,7 +49,8 @@ class Decoder(nn.Module):
         t_mode,
         y_mode,
         x_mode,
-        y_separate_enc
+        y_separate_enc,
+        common_stds,
     ):
         super().__init__()
         self.x_dim = x_dim
@@ -64,6 +65,7 @@ class Decoder(nn.Module):
         self.p_x_z_nn_layers = p_x_z_nn_layers
         self.p_x_z_nn_width = p_x_z_nn_width
         self.y_separate_enc = y_separate_enc
+        self.common_stds = common_stds
         
         #Can be used as a linear predictor if num_hidden=0
         self.n_x_estimands = sum([1 if m==0 or m==2 else m for m in x_mode])
@@ -76,6 +78,11 @@ class Decoder(nn.Module):
         self.y_nn = FullyConnected([z_dim+1] + p_y_zt_nn_layers*[p_y_zt_nn_width] + [self.y_heads])
         self.y0_nn = FullyConnected([z_dim] + p_y_zt_nn_layers*[p_y_zt_nn_width] + [self.y_heads])
         self.y1_nn = FullyConnected([z_dim] + p_y_zt_nn_layers*[p_y_zt_nn_width] + [self.y_heads])
+        
+        #Variance parameters, if one common value estimated
+        self.x_log_std = nn.Parameter(torch.FloatTensor(x_dim*[1.], device=device))
+        self.t_log_std = nn.Parameter(torch.FloatTensor([1.], device=device))
+        self.y_log_std = nn.Parameter(torch.FloatTensor([1.], device=device))
         
         self.to(device)
         
@@ -117,6 +124,11 @@ class Decoder(nn.Module):
                 y_pred = y_res
                 y_std = None
         
+        if self.common_stds:
+            x_std = torch.exp(self.x_log_std)
+            t_std = torch.exp(self.t_log_std)
+            y_std = torch.exp(self.y_log_std)
+        
         return x_pred,x_std,t_pred,t_std,y_pred,y_std
 
 class Encoder(nn.Module):
@@ -129,7 +141,8 @@ class Encoder(nn.Module):
         y_mode,
         q_z_nn_layers,
         q_z_nn_width,
-        ty_separate_enc
+        ty_separate_enc,
+        common_stds
     ):
         super().__init__()
         self.x_dim = x_dim
@@ -140,6 +153,7 @@ class Encoder(nn.Module):
         self.t_mode=t_mode
         self.y_mode=y_mode
         self.ty_separate_enc=ty_separate_enc
+        self.common_stds = common_stds
         
         # q(z|x,t,y)
         self.q_z_nn = FullyConnected([x_dim+2] + q_z_nn_layers*[q_z_nn_width] + [z_dim*2])
@@ -151,6 +165,8 @@ class Encoder(nn.Module):
         self.q_z_nn_t0y1 = FullyConnected([x_dim] + q_z_nn_layers*[q_z_nn_width] + [z_dim*2])
         self.q_z_nn_t1y0 = FullyConnected([x_dim] + q_z_nn_layers*[q_z_nn_width] + [z_dim*2])
         self.q_z_nn_t1y1 = FullyConnected([x_dim] + q_z_nn_layers*[q_z_nn_width] + [z_dim*2])
+        
+        self.z_log_std = nn.Parameter(torch.ones(z_dim, device=device))
         
         self.to(device)
         
@@ -164,6 +180,8 @@ class Encoder(nn.Module):
             z_res = self.q_z_nn(torch.cat([x, t, y], axis=1))
             z_pred = z_res[:,:self.z_dim]
             z_std = torch.exp(z_res[:,self.z_dim:])
+        if self.common_stds:
+            z_std = torch.exp(self.z_log_std)
         return z_pred, z_std
         
 class CEVAE(nn.Module):
@@ -185,7 +203,8 @@ class CEVAE(nn.Module):
         y_mode,#0 for continuous (Gaussian), 2 or more for categorical distributions (usually 2 or 0)
         x_mode,#a list, 0 for continuous (Gaussian), 2 or more for categorical distributions (usually 2 or 0)
         ty_separate_enc,
-        z_mode
+        z_mode,
+        common_stds
     ):
         super().__init__()
         
@@ -213,7 +232,8 @@ class CEVAE(nn.Module):
             y_mode,
             q_z_nn_layers,
             q_z_nn_width,
-            ty_separate_enc
+            ty_separate_enc,
+            common_stds
         )
         self.decoder = Decoder(
             x_dim,
@@ -228,7 +248,8 @@ class CEVAE(nn.Module):
             t_mode,
             y_mode,
             x_mode,
-            ty_separate_enc#Toggle on/off with the encoder for now
+            ty_separate_enc,#Toggle on/off with the encoder for now
+            common_stds
         )
         self.to(device)
         self.float()
