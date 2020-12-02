@@ -120,6 +120,12 @@ def estimate_model_py_dot(model,n=10000):
 def estimate_true_py_dot(z_probs,y_probs):
     return (y_probs*z_probs[:,None,None]).sum(0)
 
+def estimate_AID_from_py_dot(py_dot,z_probs, t_probs, y_probs):
+    t_marginal_probs = (z_probs[:,None]*t_probs).sum(0)
+    true_py_dot = estimate_true_py_dot(z_probs,y_probs)
+    AID = (np.abs(py_dot - true_py_dot).sum(1)*t_marginal_probs).sum()
+    return AID
+
 def estimate_AID(model,z_probs,t_probs,y_probs,n=10000):
     t_marginal_probs = (z_probs[:,None]*t_probs).sum(0)
     model_py_dot = estimate_model_py_dot(model,n)
@@ -129,6 +135,7 @@ def estimate_AID(model,z_probs,t_probs,y_probs,n=10000):
 
 def estimate_AID_lineardata(model, c_yt, c_yz, s_y, c_t, s_t, c_x, n=100, lim=6, nsample=10000):
     #Estimates AID for data generated with the linear structural causal model specified by the parameters
+    #TODO: Doesn't work for a linear VAE
     t_range = np.linspace(-lim,lim,n)
     y_range = np.linspace(-lim,lim,n)
     z_range = np.linspace(-lim,lim,n)
@@ -146,8 +153,12 @@ def estimate_AID_lineardata(model, c_yt, c_yz, s_y, c_t, s_t, c_x, n=100, lim=6,
     for i,t in enumerate(t_range):
         z_sample = dist.Normal(0,1).sample((nsample,model.z_dim))
         zt = torch.cat([z_sample,torch.ones(nsample,1)*t],1)
-        py_zt_res = model.decoder.y_nn(zt).detach().numpy()
-        py_zt_mean_model, py_zt_std_model = py_zt_res[:,0], np.exp(py_zt_res[:,1])#std has to be estimated with linear data
+        if model.decoder.common_stds:
+            py_zt_mean_model = model.decoder.y_nn(zt).detach().numpy()[:,0]
+            py_zt_std_model = torch.exp(model.decoder.y_log_std).repeat(nsample).detach()
+        else:
+            py_zt_res = model.decoder.y_nn(zt).detach().numpy()
+            py_zt_mean_model, py_zt_std_model = py_zt_res[:,0], np.exp(py_zt_res[:,1])#std has to be estimated with linear data
         py_zt_model = scipy.stats.norm.pdf(y_range[None,:], py_zt_mean_model[:,None], py_zt_std_model[:,None])
         py_dot_model[i,:] = py_zt_model.mean(0)
         
@@ -247,13 +258,13 @@ def train_model(device, plot_curves, print_logs,
               p_t_z_nn_layers=3, p_t_z_nn_width=10,
               p_x_z_nn_layers=3, p_x_z_nn_width=10,
               q_z_nn_layers=3, q_z_nn_width=10,
-              t_mode=2, y_mode=2, x_mode=[0], ty_separate_enc=False, z_mode=0, x_loss_scaling=1):
+              t_mode=2, y_mode=2, x_mode=[0], ty_separate_enc=False, z_mode=0, x_loss_scaling=1, common_stds=False):
     
     model = CEVAE(x_dim, z_dim, device, p_y_zt_nn_layers,
         p_y_zt_nn_width, p_t_z_nn_layers, p_t_z_nn_width,
         p_x_z_nn_layers, p_x_z_nn_width, 
         q_z_nn_layers, q_z_nn_width,
-        t_mode,y_mode,x_mode,ty_separate_enc, z_mode)
+        t_mode,y_mode,x_mode,ty_separate_enc, z_mode, common_stds)
     optimizer = Adam(model.parameters(), lr=lr_start)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma = (lr_end/lr_start)**(1/num_epochs))
     
@@ -452,10 +463,10 @@ def load_models_losses(main_folder, sub_folder, train_arguments, labels, device)
         match = re.search(r"([^_]*)_([^_]*)_(\d*)", file)
         if match.group(1) == "model":
             index = labels_to_index[match.group(2)]
-            num_epochs, lr_start, lr_end, x_dim, z_dim, p_y_zt_nn_layers, p_y_zt_nn_width, p_t_z_nn_layers, p_t_z_nn_width, p_x_z_nn_layers, p_x_z_nn_width, q_z_nn_layers, q_z_nn_width, t_mode, y_mode, x_mode, ty_separate_enc, z_mode = train_arguments[index]
+            num_epochs, lr_start, lr_end, x_dim, z_dim, p_y_zt_nn_layers, p_y_zt_nn_width, p_t_z_nn_layers, p_t_z_nn_width, p_x_z_nn_layers, p_x_z_nn_width, q_z_nn_layers, q_z_nn_width, t_mode, y_mode, x_mode, ty_separate_enc, z_mode, x_loss_scaling, common_stds = train_arguments[index]
             model = CEVAE(x_dim, z_dim, device, p_y_zt_nn_layers, p_y_zt_nn_width, p_t_z_nn_layers,
                           p_t_z_nn_width, p_x_z_nn_layers, p_x_z_nn_width, q_z_nn_layers, q_z_nn_width,
-                          t_mode, y_mode, x_mode, ty_separate_enc, z_mode)
+                          t_mode, y_mode, x_mode, ty_separate_enc, z_mode, common_stds)
             model.load_state_dict(torch.load("data/{}/{}/{}".format(main_folder, sub_folder,file)))
             model.eval()
             if not match.group(2) in models:

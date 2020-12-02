@@ -125,9 +125,9 @@ class Decoder(nn.Module):
                 y_std = None
         
         if self.common_stds:
-            x_std = torch.exp(self.x_log_std)
-            t_std = torch.exp(self.t_log_std)
-            y_std = torch.exp(self.y_log_std)
+            x_std = torch.exp(self.x_log_std).repeat(t.shape[0],1)
+            t_std = torch.exp(self.t_log_std).repeat(t.shape[0],1)
+            y_std = torch.exp(self.y_log_std).repeat(t.shape[0],1)
         
         return x_pred,x_std,t_pred,t_std,y_pred,y_std
 
@@ -181,7 +181,7 @@ class Encoder(nn.Module):
             z_pred = z_res[:,:self.z_dim]
             z_std = torch.exp(z_res[:,self.z_dim:])
         if self.common_stds:
-            z_std = torch.exp(self.z_log_std)
+            z_std = torch.exp(self.z_log_std).repeat(x.shape[0],1)
         return z_pred, z_std
         
 class CEVAE(nn.Module):

@@ -3,6 +3,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.sampler import SubsetRandomSampler
+from scipy.stats import gengamma
 
 def linear_data_df(num_samples, c_x, c_t, c_yz, c_yt, s_x, s_t, s_y):
     """c are the structural parameters and s are the standard deviations of the error terms
@@ -21,6 +22,17 @@ def linear_data_df(num_samples, c_x, c_t, c_yz, c_yt, s_x, s_t, s_y):
     df = pd.DataFrame(np.concatenate([z,x,t,y], axis=1), 
                       columns=['z'] + ['x{}'.format(i) for i in range(x_dim)] + ['t','y'])
     return df
+
+def generate_linear_parameters(x_dim):
+    #Generate parameters for the model
+    s_x = gengamma(1,5).rvs(x_dim)
+    c_x = (gengamma(0.3,4).rvs(x_dim)*s_x + s_x/2)  * np.array([2*(int(np.random.random()>0.5)-0.5) for i in range(2)])
+    s_t = gengamma(1,5).rvs(1)
+    c_t = (gengamma(0.3,4).rvs(1)*s_t + s_t/2) * 2*(int(np.random.random() > 0.5) - 0.5)
+    s_y = gengamma(1,5).rvs(1)
+    c_yt = (gengamma(0.3,4).rvs(1)*s_y + s_y/2) * 2*(int(np.random.random() > 0.5) - 0.5)
+    c_yz = (gengamma(0.3,4).rvs(1)*s_y + s_y/2) * 2*(int(np.random.random() > 0.5) - 0.5)
+    return c_x, c_t, c_yz, c_yt, s_x, s_t, s_y
 
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
