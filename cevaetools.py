@@ -393,7 +393,7 @@ def create_dfs_datasets(generate_df, dataparameters, param_times, repeat, main_f
                 datasets[labels[i]][j] = datasets
         else:
             for j in range(param_times):
-                df = generate_df(*dataparameters)
+                df = generate_df(*data_params)
                 dataset = CEVAEDataset(df)
                 #SAVE RESULTS
                 with open("./data/{}/{}/df_{}_{}".format(main_folder, sub_folder,labels[i],j), "wb") as file:
