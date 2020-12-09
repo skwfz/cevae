@@ -390,7 +390,7 @@ def create_dfs_datasets(generate_df, dataparameters, param_times, repeat, main_f
                 pickle.dump(df, file)
             for j in range(param_times):
                 dfs[labels[i]][j] = df
-                datasets[labels[i]][j] = datasets
+                datasets[labels[i]][j] = dataset
         else:
             for j in range(param_times):
                 df = generate_df(*data_params)
@@ -399,7 +399,7 @@ def create_dfs_datasets(generate_df, dataparameters, param_times, repeat, main_f
                 with open("./data/{}/{}/df_{}_{}".format(main_folder, sub_folder,labels[i],j), "wb") as file:
                     pickle.dump(df, file)
                 dfs[labels[i]][j] = df
-                datasets[labels[i]][j] = datasets
+                datasets[labels[i]][j] = dataset
     return dfs, datasets
 
 def load_dfs(main_folder, sub_folder, param_times=None):
