@@ -14,6 +14,7 @@ import pickle
 import os
 import glob
 import re
+import copy
 import functools
 from collections.abc import Iterable
 
@@ -258,7 +259,8 @@ def train_model(device, plot_curves, print_logs,
               p_t_z_nn_layers=3, p_t_z_nn_width=10,
               p_x_z_nn_layers=3, p_x_z_nn_width=10,
               q_z_nn_layers=3, q_z_nn_width=10,
-              t_mode=2, y_mode=2, x_mode=[0], ty_separate_enc=False, z_mode=0, x_loss_scaling=1, common_stds=False):
+              t_mode=2, y_mode=2, x_mode=[0], ty_separate_enc=False, 
+              z_mode=0, x_loss_scaling=1, common_stds=False, collect_params=False):
     
     model = CEVAE(x_dim, z_dim, device, p_y_zt_nn_layers,
         p_y_zt_nn_width, p_t_z_nn_layers, p_t_z_nn_width,
@@ -270,18 +272,91 @@ def train_model(device, plot_curves, print_logs,
     
     losses = {"total": [], "kld": [], "x": [], "t": [], "y": []}
     
-    different_modes = list(set(x_mode))
-    x_same_mode_indices = dict()#TODO: this not used anywhere?
-    for mode in different_modes:
-        x_same_mode_indices[mode] = [i for i,m in enumerate(x_mode) if m==mode]
+    yweights = []
     
     for epoch in range(num_epochs):
+        #i = 0
+        epoch_loss = 0
+        epoch_kld_loss = 0
+        epoch_x_loss = 0
+        epoch_t_loss = 0
+        epoch_y_loss = 0
+        if print_logs:
+            print("Epoch {}:".format(epoch))
+        for data in train_loader:
+            x = data['X'].to(device)
+            t = data['t'].to(device)
+            y = data['y'].to(device)
+            z_pred, z_std, x_pred, x_std, t_pred, t_std, y_pred, y_std = model(x,t,y)
+            if z_mode == 0:
+                kld, x_loss, t_loss, y_loss = get_losses(z_pred, z_std, x_pred, x_std, t_pred, t_std, y_pred, y_std, x, t, y,
+                                                        x_mode, t_mode, y_mode)
+            elif z_mode == 2:
+                kld, x_loss, t_loss, y_loss = get_losses_binary(z_pred, x_pred, x_std, t_pred, t_std, y_pred, y_std, x, t, y,
+                                                         model.pz_logit, x_mode, t_mode, y_mode)
+            x_loss *= x_loss_scaling
+            loss = kld + x_loss + t_loss + y_loss
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            #i += 1
+            #if i%100 == 0 and print_logs:
+            #    print("Sample batch loss: {}".format(loss))
+            epoch_loss += loss.item()
+            epoch_kld_loss += kld.item()
+            epoch_x_loss += x_loss.item()
+            epoch_t_loss += t_loss.item()
+            epoch_y_loss += y_loss.item()
+        
+        losses['total'].append(epoch_loss)
+        losses['kld'].append(epoch_kld_loss)
+        losses['x'].append(epoch_x_loss)
+        losses['t'].append(epoch_t_loss)
+        losses['y'].append(epoch_y_loss)
+        if collect_params:
+            yweights.append(model.decoder.y_nn[0].weight.detach().numpy().copy())
+        
+        scheduler.step()
+  
+        if print_logs:
+            #print("Estimated ATE {}, p(y=1|do(t=1)): {}, p(y=1|do(t=0)): {}".format(*estimate_imageCEVAE_ATE(model)))
+            print("Epoch loss: {}".format(epoch_loss))
+            print("x: {}, t: {}, y: {}, kld: {}".format(epoch_x_loss, epoch_t_loss,
+                                                        epoch_y_loss, epoch_kld_loss))
+    
+    fig, ax = plt.subplots(2,2,figsize=(8,8))
+    ax[0,0].plot(losses['x'])
+    ax[0,1].plot(losses['t'])
+    ax[1,0].plot(losses['y'])
+    ax[1,1].plot(losses['kld'])
+    ax[0,0].set_title("x loss")
+    ax[0,1].set_title("t loss")
+    ax[1,0].set_title("y loss")
+    ax[1,1].set_title("kld loss")
+    plt.show()
+    print("Total loss in the end: ", losses['total'][-1])
+    
+    return model, losses, yweights
+
+
+def train_model_starting_from(device, plot_curves, print_logs, starting_model,
+              train_loader, num_epochs, lr_start, lr_end, x_loss_scaling=1, collect_params=False):
+    model = copy.deepcopy(starting_model)
+    optimizer = Adam(model.parameters(), lr=lr_start)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma = (lr_end/lr_start)**(1/num_epochs))
+    yweights = []
+    
+    t_mode, y_mode, x_mode, z_mode = model.t_mode, model.y_mode, model.x_mode, model.z_mode
+    
+    losses = {"total": [], "kld": [], "x": [], "t": [], "y": []}
+    for epoch in range(num_epochs):
         i = 0
-        epoch_loss = []
-        epoch_kld_loss = []
-        epoch_x_loss = []
-        epoch_t_loss = []
-        epoch_y_loss = []
+        epoch_loss = 0
+        epoch_kld_loss = 0
+        epoch_x_loss = 0
+        epoch_t_loss = 0
+        epoch_y_loss = 0
         if print_logs:
             print("Epoch {}:".format(epoch))
         for data in train_loader:
@@ -304,27 +379,19 @@ def train_model(device, plot_curves, print_logs,
             i += 1
             if i%100 == 0 and print_logs:
                 print("Sample batch loss: {}".format(loss))
-            epoch_loss.append(loss.item())
-            epoch_kld_loss.append(kld.item())
-            epoch_x_loss.append(x_loss.item())
-            epoch_t_loss.append(t_loss.item())
-            epoch_y_loss.append(y_loss.item())
+            epoch_loss += loss.item()
+            epoch_kld_loss += kld.item()
+            epoch_x_loss += x_loss.item()
+            epoch_t_loss += t_loss.item()
+            epoch_y_loss += y_loss.item()
         
-        losses['total'].append(sum(epoch_loss))
-        losses['kld'].append(sum(epoch_kld_loss))
-        losses['x'].append(sum(epoch_x_loss))
-        losses['t'].append(sum(epoch_t_loss))
-        losses['y'].append(sum(epoch_y_loss))
-        
-        scheduler.step()
-  
-        if print_logs:
-            #print("Estimated ATE {}, p(y=1|do(t=1)): {}, p(y=1|do(t=0)): {}".format(*estimate_imageCEVAE_ATE(model)))
-            print("Epoch loss: {}".format(sum(epoch_loss)))
-            print("x: {}, t: {}, y: {}, kld: {}".format(sum(epoch_x_loss), sum(epoch_t_loss),
-                                                        sum(epoch_y_loss), sum(epoch_kld_loss)))
-            print
-    
+        losses['total'].append(epoch_loss)
+        losses['kld'].append(epoch_kld_loss)
+        losses['x'].append(epoch_x_loss)
+        losses['t'].append(epoch_t_loss)
+        losses['y'].append(epoch_y_loss)
+        if collect_params:
+            yweights.append(model.decoder.y_nn[0].weight.detach().numpy().copy())
     fig, ax = plt.subplots(2,2,figsize=(8,8))
     ax[0,0].plot(losses['x'])
     ax[0,1].plot(losses['t'])
@@ -337,7 +404,7 @@ def train_model(device, plot_curves, print_logs,
     plt.show()
     print("Total loss in the end: ", losses['total'][-1])
     
-    return model, losses
+    return model, losses, yweights
 
 #---------------------------------functions related to running larger scale experiments----------------------
 
@@ -427,10 +494,11 @@ def load_dfs(main_folder, sub_folder, param_times=None):
         
         
 def run_model_for_predef_datasets(datasets, param_times, main_folder, sub_folder, BATCH_SIZE, track_function, true_value,
-                                  device, train_arguments, labels, data_labels):
+                                  device, train_arguments, labels, data_labels, overwrite=True):
     #Main folder organizes related experiments with same/similar data. Sub-folder has the results from this experiment
     #datasets can be different data for each label or the same data repeated many times, however we want
-    create_or_empty_folder(main_folder,sub_folder)
+    if overwrite:
+        create_or_empty_folder(main_folder,sub_folder)
     
     train_arguments = expand_parameters(train_arguments, labels)
     train_arguments = list(map(list,zip(*train_arguments))) #dim (len(iterated, len(train_arguments))
@@ -478,6 +546,38 @@ def load_models_losses(main_folder, sub_folder, train_arguments, labels, device)
                 if not match.group(2) in losses:
                     losses[match.group(2)] = {}
                 losses[match.group(2)][int(match.group(3))] = pickle.load(file)
+    return models, losses
+
+def run_starting_from_predef_model(dataset, times, model, main_folder, sub_folder, BATCH_SIZE, track_function, true_value,
+                                   device, train_arguments, overwrite=True):
+    if overwrite:
+        create_or_empty_folder(main_folder,sub_folder)
+    models = dict()
+    losses = dict()
+    for j in range(times):
+        dataloader = DataLoader(dataset, batch_size=BATCH_SIZE)
+        model_new, loss = train_model_starting_from(device, False, False, model, dataloader, *train_arguments)
+        torch.save(model_new.state_dict(), "./data/{}/{}/model_{}".format(main_folder,sub_folder,j))
+        with open("./data/{}/{}/loss_{}".format(main_folder,sub_folder,j), "wb") as file:
+            pickle.dump(loss, file)
+        print("Estimated causal effect: {} true value: {}".format(track_function(model_new), true_value))
+        models[j] = model_new
+        losses[j] = loss
+    return models, losses
+
+def load_models_losses_started_from_predef_model(main_folder, sub_folder, starting_model, device):
+    models = {}
+    losses = {}
+    for file in os.listdir("data/{}/{}/".format(main_folder, sub_folder)):
+        match = re.search(r"([^_]*)_(\d*)", file)
+        if match.group(1) == "model":
+            model = copy.deepcopy(starting_model)
+            model.load_state_dict(torch.load("data/{}/{}/{}".format(main_folder, sub_folder,file)))
+            model.eval()
+            models[match.group(2)] = model
+        elif match.group(1) == "loss":
+            with open("data/{}/{}/{}".format(main_folder, sub_folder, file), "rb") as file:
+                losses[match.group(2)] = pickle.load(file)
     return models, losses
 
 def run_model_for_data_sets(datasize, param_times,
