@@ -150,88 +150,98 @@ def kld_loss(mu, std):
     # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
     # https://arxiv.org/abs/1312.6114
     # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-    #Note that the sum is over the dimensions of z as well as over the units in the batch here
+    #Note that this corresponds to mean loss functions
     var = std.pow(2)
-    kld = -0.5 * torch.sum(1 + torch.log(var) - mu.pow(2) - var)
+    kld = -0.5 * torch.sum(1 + torch.log(var) - mu.pow(2) - var, 1).mean()
     return kld
+
+def run_epoch(model, optimizer, train_loader, loss_scaling, epoch, device):
+    epoch_loss = 0
+    epoch_kld_loss = 0
+    epoch_image_loss = 0
+    epoch_x_loss = 0
+    epoch_t_loss = 0
+    epoch_y_loss = 0
+    if epoch%20==0:
+        print("Epoch {}:".format(epoch))
+    for data in train_loader:
+        image = data['image'].to(device)
+        x = data['X'].to(device)
+        t = data['t'].to(device)
+        y = data['y'].to(device)
+        image_mean, image_std, z_mean, z_std, x_pred, x_std, t_pred, y_pred = model(image,x,t,y)
+        kld = kld_loss(z_mean, z_std)
+        #image_loss = -dist.Normal(loc=image_mean, scale = image_std).log_prob(image).sum()
+        image_loss = -dist.Bernoulli(logits=image_mean).log_prob(image).mean(0).sum()*loss_scaling
+        x_loss = -dist.Normal(loc=x_pred, scale = x_std).log_prob(x).mean(0).sum()
+        t_loss = -dist.Bernoulli(logits=t_pred).log_prob(t).mean(0).sum()#sum not really necessary
+        y_loss = -dist.Bernoulli(logits=y_pred).log_prob(y).mean(0).sum()
+        loss = kld + image_loss + x_loss + t_loss + y_loss
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        epoch_loss += loss.item()
+        epoch_kld_loss += kld.item()
+        epoch_image_loss += image_loss.item()
+        epoch_x_loss += x_loss.item()
+        epoch_t_loss += t_loss.item()
+        epoch_y_loss += y_loss.item()
+
+        del loss, image_mean, image_std, z_mean, z_std, x_pred, x_std, t_pred, y_pred, image, x, t, y
+    if epoch%20==0:
+        print("Image: {}, x: {}, t: {}, y: {}".format(epoch_image_loss, epoch_x_loss,epoch_t_loss,epoch_y_loss))
+    torch.cuda.empty_cache()
+    return epoch_loss, epoch_kld_loss, epoch_image_loss, epoch_x_loss, epoch_t_loss, epoch_y_loss
 
 def train_model(device, plot_curves, print_logs,
               train_loader, num_epochs, lr_start, lr_end, x_dim, z_dim,
               p_y_zt_nn=False, p_y_zt_nn_layers=3, p_y_zt_nn_width=10, 
               p_t_z_nn=False, p_t_z_nn_layers=3, p_t_z_nn_width=10,
-              p_x_z_nn=False, p_x_z_nn_layers=3, p_x_z_nn_width=10, loss_scaling=1):
+              p_x_z_nn=False, p_x_z_nn_layers=3, p_x_z_nn_width=10, loss_scaling=1, separate_ty=False):
+    print(loss_scaling)
     while True:
-        
         model = ImageCEVAE(x_dim, z_dim, device=device, p_y_zt_nn=p_y_zt_nn, p_y_zt_nn_layers=p_y_zt_nn_layers,
             p_y_zt_nn_width=p_y_zt_nn_width, p_t_z_nn=p_t_z_nn, p_t_z_nn_layers=p_t_z_nn_layers, p_t_z_nn_width=p_t_z_nn_width,
-            p_x_z_nn=p_x_z_nn, p_x_z_nn_layers=p_x_z_nn_layers, p_x_z_nn_width=p_x_z_nn_width)
+            p_x_z_nn=p_x_z_nn, p_x_z_nn_layers=p_x_z_nn_layers, p_x_z_nn_width=p_x_z_nn_width,separate_ty=separate_ty)
         optimizer = Adam(model.parameters(), lr=lr_start)
         scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma = (lr_end/lr_start)**(1/num_epochs))
 
         losses = {"total": [], "kld": [], "image": [], "x": [], "t": [], "y": []}
-
+        py_dot1s = []
+        py_dot0s = []
+        
         for epoch in range(num_epochs):
             i = 0
-            epoch_loss = []
-            epoch_kld_loss = []
-            epoch_image_loss = []
-            epoch_x_loss = []
-            epoch_t_loss = []
-            epoch_y_loss = []
-            if print_logs:
-                print("Epoch {}:".format(epoch))
-            for data in train_loader:
-                image = data['image'].to(device)
-                x = data['X'].to(device)
-                t = data['t'].to(device)
-                y = data['y'].to(device)
-                image_mean, image_std, z_mean, z_std, x_pred, x_std, t_pred, y_pred = model(image,x,t,y)
-                kld = kld_loss(z_mean, z_std)
-                #image_loss = -dist.Normal(loc=image_mean, scale = image_std).log_prob(image).sum()
-                image_loss = -dist.Bernoulli(logits=image_mean).log_prob(image).sum()*loss_scaling
-                x_loss = -dist.Normal(loc=x_pred, scale = x_std).log_prob(x).sum()
-                t_loss = -dist.Bernoulli(logits=t_pred).log_prob(t).sum()
-                y_loss = -dist.Bernoulli(logits=y_pred).log_prob(y).sum()
-                loss = kld + image_loss + x_loss + t_loss + y_loss
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-                i += 1
-                if i%100 == 0 and print_logs:
-                    print("Sample batch loss: {}".format(loss))
-                epoch_loss.append(loss.item())
-                epoch_kld_loss.append(kld.item())
-                epoch_image_loss.append(image_loss.item())
-                epoch_x_loss.append(x_loss.item())
-                epoch_t_loss.append(t_loss.item())
-                epoch_y_loss.append(y_loss.item())
-
-            losses['total'].append(sum(epoch_loss))
-            losses['kld'].append(sum(epoch_kld_loss))
-            losses['image'].append(sum(epoch_image_loss))
-            losses['x'].append(sum(epoch_x_loss))
-            losses['t'].append(sum(epoch_t_loss))
-            losses['y'].append(sum(epoch_y_loss))
+            
+            epoch_loss, epoch_kld_loss, epoch_image_loss, epoch_x_loss, epoch_t_loss, epoch_y_loss = run_epoch(model, optimizer, train_loader, loss_scaling, epoch, device)
+            
+            losses['total'].append(epoch_loss)
+            losses['kld'].append(epoch_kld_loss)
+            losses['image'].append(epoch_image_loss)
+            losses['x'].append(epoch_x_loss)
+            losses['t'].append(epoch_t_loss)
+            losses['y'].append(epoch_y_loss)
 
             scheduler.step()
 
-            if not (losses['total'][-1] < 1e10):
+            """if not (losses['total'][-1] < 1e10):
                 print("Exploded!")
-                break
-                #fig, ax = plt.subplots(2,2, figsize=(8,8))
-                #ax[0,0].plot(epoch_loss)
-                #ax[0,1].plot(epoch_x_loss)
-                #ax[1,0].plot(epoch_image_loss)
-                #ax[1,1].plot(epoch_kld_loss)
-                #plt.show()
-
+                break"""
+            
+            ate,pydot1,pydot0 = estimate_imageCEVAE_ATE(model)
+            py_dot1s.append(pydot1.item())
+            py_dot0s.append(pydot0.item())
+            
+            if epoch%20 == 0:
+                print(ate.item(),pydot1.item(),pydot0.item())
+            
             if print_logs:
-                print("Estimated ATE {}, p(y=1|do(t=1)): {}, p(y=1|do(t=0)): {}".format(*estimate_imageCEVAE_ATE(model)))
-                print("Epoch loss: {}".format(sum(epoch_loss)))
-                print("Image: {}, x: {}, t: {}, y: {}".format(sum(epoch_image_loss), sum(epoch_x_loss),sum(epoch_t_loss),sum(epoch_y_loss)))
+                print("Estimated ATE {}, p(y=1|do(t=1)): {}, p(y=1|do(t=0)): {}".format(ate,pydot1,pydot0))
+                print("Epoch loss: {}".format(epoch_loss))
+                print("Image: {}, x: {}, t: {}, y: {}".format(epoch_image_loss, epoch_x_loss,epoch_t_loss,epoch_y_loss))
                 print()
-                if sum(epoch_x_loss) > 1e8:
+                if epoch_x_loss > 1e8:
                     generator = lambda z: model.decoder.x_nn(z.to(device))
                     viz_other_space(generator, dim1=0, dim2=0, gendim=z_dim)
                     print("x_std: ", x_std)
@@ -251,13 +261,26 @@ def train_model(device, plot_curves, print_logs,
                 plt.show()
         if epoch == num_epochs - 1:#check if training didn't stop too early
             break
-            
-    plt.figure()
-    plt.plot([loss for loss in losses['total'] if loss < 1e8])
+    
+    fig, ax = plt.subplots(2,3,figsize=(12,8))
+    ax[0,0].plot(losses['image'])
+    ax[0,1].plot(losses['t'])
+    ax[0,2].plot(losses['x'])
+    ax[1,0].plot(losses['y'])
+    ax[1,1].plot([loss for loss in losses['kld'] if loss < 1e4])
+    ax[1,2].plot([loss for loss in losses['total'] if loss < 1e4])
+    ax[0,0].set_title("image loss")
+    ax[0,1].set_title("t loss")
+    ax[0,2].set_title("x loss")
+    ax[1,0].set_title("y loss")
+    ax[1,1].set_title("kld loss")
+    ax[0,2].set_title("total loss")
+    plt.show()
+    plt.plot()
     plt.title("Loss at end of each epoch")
     plt.show()
     
-    return model, losses
+    return model, losses, py_dot1s, py_dot0s
 
 def train_decoder(device, model, print_logs, train_loader, num_epochs, lr_start, lr_end):
     """Continues the training of the model, but freezes the encoder and only trains the p(y|z,t), p(t|z) and p(x|z)
@@ -297,6 +320,31 @@ def train_decoder(device, model, print_logs, train_loader, num_epochs, lr_start,
             print("x: {}, t: {}, y: {}".format(epoch_x_loss,epoch_t_loss,epoch_y_loss))
             print()
 
+def trainconvynet(device, num_epochs, dataset, BATCH_SIZE, lr_start, lr_end):
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE)
+    model = ConvyNet(device=device)
+    optimizer = Adam(model.parameters(), lr=lr_start)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma = (lr_end/lr_start)**(1/num_epochs))
+    epoch_losses = []
+    for epoch in range(num_epochs):
+        if epoch%5 == 0:
+            print("Epoch {}".format(epoch))
+        epoch_losses.append(0)
+        for batch in dataloader:
+            image = batch['image'].to(device)
+            x = batch['X'].to(device)
+            t = batch['t'].to(device)
+            y = batch['y'].to(device)
+            ypred = model(image, x, t)
+            loss = -dist.Bernoulli(logits=ypred).log_prob(y).mean(0).sum()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            epoch_losses[-1] += loss.item()
+        scheduler.step()
+    plt.plot(epoch_losses)
+    return model
+            
 def expand_parameters(params, iterated):
     """Helper function to get the elements in params to be lists of len(iterated)"""
     new_params = len(params)*[None]
@@ -307,6 +355,177 @@ def expand_parameters(params, iterated):
             assert len(params[i]) == len(iterated)
             new_params[i] = params[i].copy()
     return new_params
+
+def create_or_empty_folder(main_folder,sub_folder):
+    try:
+        os.mkdir("./data/{}/".format(main_folder))
+    except OSError:
+        pass
+    try:
+        os.mkdir("./data/{}/{}/".format(main_folder,sub_folder))
+    except OSError:
+        print("Creation of the directory './data/{}/{}/ failed. Trying to empty the same folder.".format(main_folder,sub_folder))
+        files = glob.glob('./data/{}/{}/*'.format(main_folder, sub_folder))
+        for f in files:
+            os.remove(f)
+
+def save_dataparameters(dataparameters, main_folder, sub_folder):
+    create_or_empty_folder(main_folder,sub_folder)
+    with open("./data/{}/{}/params".format(main_folder,sub_folder), "wb") as file:
+        pickle.dump(dataparameters, file)
+
+def load_dataparameters(main_folder, sub_folder):
+    with open("./data/{}/{}/params".format(main_folder,sub_folder), "rb") as file:
+        return pickle.load(file)
+
+def create_dfs_datasets(generate_data, dataparameters, param_times, repeat, main_folder, sub_folder, labels):
+    #dataparameters has to be a list of lists, param_times is how many times we use one data parameter combination
+    #repeat is a boolean that tells whether we should use the same data
+    create_or_empty_folder(main_folder,sub_folder)
+    
+    dfs = {label: {} for label in labels}
+    datasets = {label: {} for label in labels}
+    for i,data_params in enumerate(dataparameters):
+        print("Step ", i)
+        if repeat:
+            z, images, x, t, y, dataset = generate_data(*data_params)
+            df = pd.DataFrame(torch.cat([z,x,t,y],1).detach().numpy().squeeze(),columns=["z"+str(i) for i in range(z.shape[1])] + ["x0","t","y"])
+            #SAVE RESULTS
+            with open("./data/{}/{}/df_{}".format(main_folder, sub_folder,labels[i]), "wb") as file:
+                pickle.dump(df, file)
+            with open("./data/{}/{}/dataset_{}".format(main_folder, sub_folder,labels[i]), "wb") as file:
+                pickle.dump(dataset, file)
+            for j in range(param_times):
+                dfs[labels[i]][j] = df
+                datasets[labels[i]][j] = dataset
+        else:
+            for j in range(param_times):
+                z, images, x, t, y, dataset = generate_data(*data_params)
+                df = pd.DataFrame(torch.cat([z,x,t,y],1).detach().numpy().squeeze(),columns=["z"+str(i) for i in range(z.shape[1])] + ["x0","t","y"])
+                #SAVE RESULTS
+                with open("./data/{}/{}/df_{}_{}".format(main_folder, sub_folder,labels[i],j), "wb") as file:
+                    pickle.dump(df, file)
+                with open("./data/{}/{}/dataset_{}_{}".format(main_folder, sub_folder,labels[i],j), "wb") as file:
+                    pickle.dump(dataset, file)
+                dfs[labels[i]][j] = df
+                datasets[labels[i]][j] = dataset
+    return dfs, datasets
+
+def load_dfs_datasets(main_folder, sub_folder, param_times=None):
+    dfs = {}
+    datasets = {}
+    for filename in os.listdir("data/{}/{}/".format(main_folder, sub_folder)):
+        match = re.search(r"df_([^_]*)_(\d*)", filename)
+        if match:
+            if not match.group(1) in dfs:
+                dfs[match.group(1)] = {}
+            with open("data/{}/{}/{}".format(main_folder,sub_folder,filename), "rb") as file:
+                dfs[match.group(1)][int(match.group(2))] = pickle.load(file)
+        else:
+            match = re.search(r"df_([^_]*)", filename)
+            if match:
+                with open("data/{}/{}/{}".format(main_folder,sub_folder,filename), "rb") as file:
+                    dfs[match.group(1)] = {}
+                    df =  pickle.load(file)
+                    for i in range(param_times):
+                        dfs[match.group(1)][i] = df
+        match = re.search(r"dataset_([^_]*)_(\d*)", filename)
+        if match:
+            if not match.group(1) in datasets:
+                datasets[match.group(1)] = {}
+            with open("data/{}/{}/{}".format(main_folder,sub_folder,filename), "rb") as file:
+                datasets[match.group(1)][int(match.group(2))] = pickle.load(file)
+        else:
+            match = re.search(r"dataset_([^_]*)", filename)
+            if match:
+                with open("data/{}/{}/{}".format(main_folder,sub_folder,filename), "rb") as file:
+                    datasets[match.group(1)] = {}
+                    dataset = pickle.load(file)
+                    for i in range(param_times):
+                        datasets[match.group(1)][i] = dataset
+    return dfs, datasets
+
+def run_model_for_predef_datasets(datasets, param_times, main_folder, sub_folder, BATCH_SIZE, track_function, true_value,
+                                  device, train_arguments, labels, data_labels, overwrite=True):
+    #Main folder organizes related experiments with same/similar data. Sub-folder has the results from this experiment
+    #datasets can be different data for each label or the same data repeated many times, however we want
+    if overwrite:
+        create_or_empty_folder(main_folder,sub_folder)
+    
+    train_arguments = expand_parameters(train_arguments, labels)
+    train_arguments = list(map(list,zip(*train_arguments))) #dim (len(iterated, len(train_arguments))
+    
+    models = {label: {} for label in labels}
+    losses = {label: {} for label in labels}
+    pydot1s = {label: {} for label in labels}
+    pydot0s = {label: {} for label in labels}
+    
+    for i in range(len(labels)):
+        for j in range(param_times):
+            dataloader = DataLoader(datasets[data_labels[i]][j], batch_size=BATCH_SIZE)
+            #Running the model
+            model, loss, pydot1, pydot0 = train_model(device, False, False, dataloader, *train_arguments[i])
+            torch.save(model.state_dict(), "./data/{}/{}/model_{}_{}".format(main_folder,sub_folder,labels[i],j))
+            with open("./data/{}/{}/loss_{}_{}".format(main_folder,sub_folder,labels[i],j), "wb") as file:
+                pickle.dump(loss, file)
+            with open("./data/{}/{}/pydot1_{}_{}".format(main_folder,sub_folder,labels[i],j), "wb") as file:
+                pickle.dump(pydot1, file)
+            with open("./data/{}/{}/pydot0_{}_{}".format(main_folder,sub_folder,labels[i],j), "wb") as file:
+                pickle.dump(pydot0, file)
+            print("Estimated causal effect: {} true value: {}".format(track_function(model), true_value))
+            models[labels[i]][j] = model
+            losses[labels[i]][j] = loss
+            pydot1s[labels[i]][j] = pydot1
+            pydot0s[labels[i]][j] = pydot0
+    
+    return models, losses, pydot1s, pydot0s
+
+def load_models_losses(main_folder, sub_folder, train_arguments, labels, device):
+    train_arguments = expand_parameters(train_arguments, labels)
+    train_arguments = list(map(list, zip(*train_arguments)))
+    #We see only the labels in the folder, but we want the indices for accessing other arguments (train_arguments)
+    labels_to_index = dict(zip(map(str,labels), range(len(labels))))
+    models = {}
+    losses = {}
+    for file in os.listdir("data/{}/{}/".format(main_folder, sub_folder)):
+        match = re.search(r"([^_]*)_([^_]*)_(\d*)", file)
+        if match.group(1) == "model":
+            index = labels_to_index[match.group(2)]
+            num_epochs, lr_start, lr_end, x_dim, z_dim, p_y_zt_nn, p_y_zt_nn_layers, p_y_zt_nn_width, p_t_z_nn, p_t_z_nn_layers, p_t_z_nn_width, p_x_z_nn, p_x_z_nn_layers, p_x_z_nn_width, loss_scaling, separate_ty = train_arguments[index]
+            model = ImageCEVAE(x_dim, z_dim, device=device, p_y_zt_nn=p_y_zt_nn, p_y_zt_nn_layers=p_y_zt_nn_layers,
+                        p_y_zt_nn_width=p_y_zt_nn_width, p_t_z_nn=p_t_z_nn, p_t_z_nn_layers=p_t_z_nn_layers, 
+                        p_t_z_nn_width=p_t_z_nn_width, p_x_z_nn=p_x_z_nn, 
+                        p_x_z_nn_layers=p_x_z_nn_layers, p_x_z_nn_width=p_x_z_nn_width, separate_ty=separate_ty)
+            model.load_state_dict(torch.load("data/{}/{}/{}".format(main_folder, sub_folder,file)))
+            model.eval()
+            if not match.group(2) in models:
+                models[match.group(2)] = {int(match.group(3)): model}
+            else:
+                models[match.group(2)][int(match.group(3))] = model
+        elif match.group(1) == "loss":
+            with open("data/{}/{}/{}".format(main_folder, sub_folder, file), "rb") as file:
+                if not match.group(2) in losses:
+                    losses[match.group(2)] = {}
+                losses[match.group(2)][int(match.group(3))] = pickle.load(file)
+    return models, losses
+        
+def load_pydots(main_folder, sub_folder, labels, device):
+    labels_to_index = dict(zip(map(str,labels), range(len(labels))))
+    pydot1s = {}
+    pydot0s = {}
+    for file in os.listdir("data/{}/{}/".format(main_folder, sub_folder)):
+        match = re.search(r"([^_]*)_([^_]*)_(\d*)", file)
+        if match.group(1) == "pydot1":
+            with open("data/{}/{}/{}".format(main_folder, sub_folder, file), "rb") as file:
+                if not match.group(2) in pydot1s:
+                    pydot1s[match.group(2)] = {}
+                pydot1s[match.group(2)][int(match.group(3))] = pickle.load(file)
+        elif match.group(1) == "pydot0":
+            with open("data/{}/{}/{}".format(main_folder, sub_folder, file), "rb") as file:
+                if not match.group(2) in pydot0s:
+                    pydot0s[match.group(2)] = {}
+                pydot0s[match.group(2)][int(match.group(3))] = pickle.load(file)
+    return pydot1s, pydot0s
 
 def run_model_for_data_sets(datasize, param_times,
                             folder, name, 

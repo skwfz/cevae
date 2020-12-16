@@ -89,26 +89,47 @@ class Encoder(nn.Module):
         z_dim,
         device,
         ngf=64,
-        nc=1
+        nc=1,
+        separate_ty=False
     ):
         super().__init__()
+        self.device = device
+        self.separate_ty = separate_ty
         
         self.c1 = nn.Sequential(nn.Conv2d(nc,ngf,kernel_size=6,stride=2,padding=2,bias=False), nn.ELU())
         self.c2 = nn.Sequential(nn.Conv2d(ngf,2*ngf,kernel_size=6,stride=2,padding=1,bias=False), nn.ELU())
         self.c3 = nn.Sequential(nn.Conv2d(2*ngf,4*ngf,kernel_size=4,stride=2,padding=1,bias=False), nn.ELU())
         self.c4 = nn.Sequential(nn.Conv2d(4*ngf,40,kernel_size=3,stride=1,bias=False), nn.ELU())
         self.fc = nn.Sequential(nn.Linear(40+x_dim+2,z_dim+5),nn.ELU())#I guess that this could be optimized
+        self.fc00 = nn.Sequential(nn.Linear(40+x_dim,z_dim+5),nn.ELU())
+        self.fc01 = nn.Sequential(nn.Linear(40+x_dim,z_dim+5),nn.ELU())
+        self.fc10 = nn.Sequential(nn.Linear(40+x_dim,z_dim+5),nn.ELU())
+        self.fc11 = nn.Sequential(nn.Linear(40+x_dim,z_dim+5),nn.ELU())
         self.mean = nn.Linear(z_dim+5,z_dim)#z_dim+5 to to avoid bottlenecks and on the other hand instability in optimization
         self.logstd = nn.Linear(z_dim+5,z_dim)
+        self.mean00 = nn.Linear(z_dim+5,z_dim)
+        self.mean01 = nn.Linear(z_dim+5,z_dim)
+        self.mean10 = nn.Linear(z_dim+5,z_dim)
+        self.mean11 = nn.Linear(z_dim+5,z_dim)
+        self.logstd00 = nn.Linear(z_dim+5,z_dim)
+        self.logstd01 = nn.Linear(z_dim+5,z_dim)
+        self.logstd10 = nn.Linear(z_dim+5,z_dim)
+        self.logstd11 = nn.Linear(z_dim+5,z_dim)
         
     def forward(self,image,x,t,y):
         temp = self.c1(image)
         temp = self.c2(temp)
         temp = self.c3(temp)
         temp = self.c4(temp)
-        temp = self.fc(torch.cat([temp[:,:,0,0],x,t,y],1))
-        z_mean = self.mean(temp)
-        z_std = torch.exp(self.logstd(temp))
+        #if self.separate_ty:
+        imx = torch.cat([temp[:,:,0,0],x],1)
+        temp = self.fc11(imx)*t*y + self.fc10(imx)*t*(1-y) + self.fc01(imx)*(1-t)*y + self.fc00(imx)*(1-t)*(1-y)
+        z_mean = self.mean11(temp)*t*y + self.mean10(temp)*t*(1-y) + self.mean01(temp)*(1-t)*y + self.mean00(temp)*(1-t)*(1-y)
+        z_std = torch.exp(self.logstd11(temp)*t*y + self.logstd10(temp)*t*(1-y) + self.logstd01(temp)*(1-t)*y + self.logstd00(temp)*(1-t)*(1-y))
+        #else:
+        #temp = self.fc(torch.cat([temp[:,:,0,0],x,t,y],1))
+        #z_mean = self.mean(temp)
+        #z_std = torch.exp(self.logstd(temp))
         return z_mean,z_std#dim (batch_size,z_dim)
 
 class ImageCEVAE(nn.Module):
@@ -125,7 +146,8 @@ class ImageCEVAE(nn.Module):
         p_t_z_nn_width=10,
         p_x_z_nn=False,
         p_x_z_nn_layers=3,
-        p_x_z_nn_width=10
+        p_x_z_nn_width=10,
+        separate_ty=False
     ):
         super().__init__()
         
@@ -137,6 +159,7 @@ class ImageCEVAE(nn.Module):
             x_dim,
             z_dim,
             device=device,
+            separate_ty=separate_ty
         )
         self.decoder = Decoder(
             x_dim,
@@ -167,3 +190,23 @@ class ImageCEVAE(nn.Module):
         image, image_std, x_pred, x_std, t_pred, y_pred = self.decoder(z,t)
         
         return image, image_std, z_mean, z_std, x_pred, x_std, t_pred, y_pred
+    
+    
+class ConvyNet(nn.Module):
+    def __init__(self,ngf=64,nc=1,device='cuda'):
+        super().__init__()
+        self.c1 = nn.Sequential(nn.Conv2d(nc,ngf,kernel_size=6,stride=2,padding=2,bias=False), nn.ELU())
+        self.c2 = nn.Sequential(nn.Conv2d(ngf,2*ngf,kernel_size=6,stride=2,padding=1,bias=False), nn.ELU())
+        self.c3 = nn.Sequential(nn.Conv2d(2*ngf,4*ngf,kernel_size=4,stride=2,padding=1,bias=False), nn.ELU())
+        self.c4 = nn.Sequential(nn.Conv2d(4*ngf,40,kernel_size=3,stride=1,bias=False), nn.ELU())
+        self.fc0 = nn.Linear(40+1,1)
+        self.fc1 = nn.Linear(40+1,1)
+        self.to(device)
+        
+    def forward(self,image,x,t):
+        temp = self.c1(image)
+        temp = self.c2(temp)
+        temp = self.c3(temp)
+        temp = self.c4(temp)
+        temp = self.fc1(torch.cat([temp[:,:,0,0],x],1))*t + self.fc0(torch.cat([temp[:,:,0,0],x],1))*(1-t)
+        return temp
