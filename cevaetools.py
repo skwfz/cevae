@@ -222,7 +222,7 @@ def get_losses(z_mean, z_std, x_pred, x_std, t_pred, t_std, y_pred, y_std,
 def get_losses_binary(z_pred, x_pred, x_std, t_pred, t_std, y_pred, y_std, x, t, y, pz_logit, x_mode, t_mode, y_mode):
     kld = kld_loss_binary(z_pred, pz_logit)
     qz_probs = torch.cat([1-torch.sigmoid(z_pred),torch.sigmoid(z_pred)],0).squeeze()
-    x = torch.cat([x,x],0)
+    x = torch.cat([x,x],0)#Purpose is to evaluate for both parts of the expected value, t_pred etc. should be prepared for this
     y = torch.cat([y,y],0)
     t = torch.cat([t,t],0)
     x_loss = 0
@@ -272,7 +272,7 @@ def train_model(device, plot_curves, print_logs,
     
     losses = {"total": [], "kld": [], "x": [], "t": [], "y": []}
     
-    yweights = []
+    modelparams = []
     
     for epoch in range(num_epochs):
         #i = 0
@@ -315,7 +315,10 @@ def train_model(device, plot_curves, print_logs,
         losses['t'].append(epoch_t_loss)
         losses['y'].append(epoch_y_loss)
         if collect_params:
-            yweights.append(model.decoder.y_nn[0].weight.detach().numpy().copy())
+            if collect_params == 2:
+                modelparams.append(estimate_model_py_dot(model))
+            else:
+                modelparams.append(model.decoder.y_nn[0].weight.detach().numpy().copy())
         
         scheduler.step()
   
@@ -337,7 +340,7 @@ def train_model(device, plot_curves, print_logs,
     plt.show()
     print("Total loss in the end: ", losses['total'][-1])
     
-    return model, losses, yweights
+    return model, losses, modelparams
 
 
 def train_model_starting_from(device, plot_curves, print_logs, starting_model,
@@ -345,7 +348,7 @@ def train_model_starting_from(device, plot_curves, print_logs, starting_model,
     model = copy.deepcopy(starting_model)
     optimizer = Adam(model.parameters(), lr=lr_start)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma = (lr_end/lr_start)**(1/num_epochs))
-    yweights = []
+    modelparams = []
     
     t_mode, y_mode, x_mode, z_mode = model.t_mode, model.y_mode, model.x_mode, model.z_mode
     
@@ -391,7 +394,10 @@ def train_model_starting_from(device, plot_curves, print_logs, starting_model,
         losses['t'].append(epoch_t_loss)
         losses['y'].append(epoch_y_loss)
         if collect_params:
-            yweights.append(model.decoder.y_nn[0].weight.detach().numpy().copy())
+            if collect_params == 2:
+                modelparams.append(estimate_model_py_dot(model))
+            else:
+                modelparams.append(model.decoder.y_nn[0].weight.detach().numpy().copy())
     fig, ax = plt.subplots(2,2,figsize=(8,8))
     ax[0,0].plot(losses['x'])
     ax[0,1].plot(losses['t'])
@@ -404,7 +410,7 @@ def train_model_starting_from(device, plot_curves, print_logs, starting_model,
     plt.show()
     print("Total loss in the end: ", losses['total'][-1])
     
-    return model, losses, yweights
+    return model, losses, modelparams
 
 #---------------------------------functions related to running larger scale experiments----------------------
 
@@ -441,10 +447,11 @@ def load_dataparameters(main_folder, sub_folder):
     with open("./data/{}/{}/params".format(main_folder,sub_folder), "rb") as file:
         return pickle.load(file)
 
-def create_dfs_datasets(generate_df, dataparameters, param_times, repeat, main_folder, sub_folder, labels):
+def create_dfs_datasets(generate_df, dataparameters, param_times, repeat, main_folder, sub_folder, labels, overwrite=True):
     #dataparameters has to be a list of lists, param_times is how many times we use one data parameter combination
     #repeat is a boolean that tells whether we should use the same data
-    create_or_empty_folder(main_folder,sub_folder)
+    if overwrite:
+        create_or_empty_folder(main_folder,sub_folder)
     
     dfs = {label: {} for label in labels}
     datasets = {label: {} for label in labels}
@@ -507,13 +514,16 @@ def run_model_for_predef_datasets(datasets, param_times, main_folder, sub_folder
     losses = {label: {} for label in labels}
     
     for i in range(len(labels)):
+        print("Label ", labels[i])
         for j in range(param_times):
             dataloader = DataLoader(datasets[data_labels[i]][j], batch_size=BATCH_SIZE)
             #Running the model
-            model, loss = train_model(device, False, False, dataloader, *train_arguments[i])
+            model, loss, savedparams = train_model(device, False, False, dataloader, *train_arguments[i])
             torch.save(model.state_dict(), "./data/{}/{}/model_{}_{}".format(main_folder,sub_folder,labels[i],j))
             with open("./data/{}/{}/loss_{}_{}".format(main_folder,sub_folder,labels[i],j), "wb") as file:
                 pickle.dump(loss, file)
+            with open("./data/{}/{}/savedparams_{}_{}".format(main_folder,sub_folder,labels[i],j), "wb") as file:
+                pickle.dump(savedparams, file)
             print("Estimated causal effect: {} true value: {}".format(track_function(model), true_value))
             models[labels[i]][j] = model
             losses[labels[i]][j] = loss
@@ -547,6 +557,17 @@ def load_models_losses(main_folder, sub_folder, train_arguments, labels, device)
                     losses[match.group(2)] = {}
                 losses[match.group(2)][int(match.group(3))] = pickle.load(file)
     return models, losses
+
+def load_saved_params(main_folder, sub_folder, labels):
+    saved_params = {}
+    for file in os.listdir("data/{}/{}/".format(main_folder, sub_folder)):
+        match = re.search(r"([^_]*)_([^_]*)_(\d*)", file)
+        if match.group(1) == "savedparams":
+            with open("data/{}/{}/{}".format(main_folder, sub_folder, file), "rb") as file:
+                if not match.group(2) in saved_params:
+                    saved_params[match.group(2)] = {}
+                saved_params[match.group(2)][int(match.group(3))] = pickle.load(file)
+    return saved_params
 
 def run_starting_from_predef_model(dataset, times, model, main_folder, sub_folder, BATCH_SIZE, track_function, true_value,
                                    device, train_arguments, overwrite=True):
