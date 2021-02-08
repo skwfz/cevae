@@ -283,6 +283,8 @@ def run_cevae(num_epochs, lr_start, lr_end, train_loader, test_loader, input_dim
     optimizer = Adam(model.parameters(), lr=lr_start)
 
     def _prepare_batch(batch):
+        if 'y' in batch:
+            batch['yf'] = batch['y']
         x = batch['X'].to(device)
         t = batch['t'].to(device)
         yf = batch['yf'].to(device)
@@ -358,7 +360,6 @@ def run_cevae(num_epochs, lr_start, lr_end, train_loader, test_loader, input_dim
             
             return {
                 "E_y_x_do1":E_y_x_do1,"E_y_x_do0":E_y_x_do0,"ITE_x":ITE_x,
-                "y1":batch['y1'],"y0":batch['y0'],
                 "y_logits0":y_logits0, "y_logits1":y_logits1, "yf":yf,
                 "x_logits0":x_logits0, "x_logits1":x_logits1,"x":x,
                 "t_logits0":t_logits0, "t_logits1":t_logits1, "t":t,
