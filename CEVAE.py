@@ -103,18 +103,19 @@ class Decoder(nn.Module):
         if self.y_separate_enc and self.t_mode==2:
             y_res0 = self.y0_nn(z)
             y_res1 = self.y1_nn(z)
+            y_std = 0
             if self.y_mode==0:
                 y_pred0 = y_res0[:,:1]
                 y_std0 = torch.exp(y_res0[:,1:])
                 y_pred1 = y_res1[:,:1]
                 y_std1 = torch.exp(y_res1[:,1:])
+                y_std = y_std1*t + y_std0*(1-t)
             else:
                 y_pred0 = y_res0
                 y_std0 = None
                 y_pred1 = y_res1
                 y_std1 = None
             y_pred = y_pred1*t + y_pred0*(1-t)
-            y_std = y_std1*t + y_std0*(1-t)
         else:
             y_res = self.y_nn(torch.cat([z,t],1))
             if self.y_mode == 0:
